@@ -66,7 +66,7 @@ def test_qmv(self):
 **Key points:**
 
 - **Correctness gate:** `(y - y_ref).abs().max() < 1e-3`. Max absolute element error against a dequantized reference. Not NMSE.
-- **Reference is dequant-then-FP-matmul.** `w_hat = dequantize(w_q, ...)` then `x @ w_hat.T`. This is what we'd compute in M1 (the dense reference qmv against repacked weights — verifies the layout — and what M2 compares against with sparse columns of `x` zeroed).
+- **Reference is dequant-then-FP-matmul.** `w_hat = dequantize(w_q, ...)` then `x @ w_hat.T`. This is what we'd compute in M1 (the dense reference qmv against zigzag-quantized weights — verifies the layout — and what M2 compares against with sparse columns of `x` zeroed).
 - **`subTest` for parameter sweeps.** Lets one method cover the cartesian product without the loop hiding which case failed.
 - **MLX random with key splitting** for reproducibility.
 
@@ -232,7 +232,7 @@ GPU stream.
 import mlx.core as mx
 import mlx_spqt   # our extension; pip install -e extensions/mlx_spqt/
 
-# w_zz, scales_zz, biases_zz are produced by mlx_spqt.zigzag_repack(...) (M1)
+# w_zz, scales_zz, biases_zz are produced by mlx_spqt.zigzag_quantize(...) (M1)
 # idx is a host-built mx.array of int32 non-sparse K-indices
 y = mlx_spqt.zigzag_qmv(x, w_zz, scales_zz, biases_zz, idx)
 ```
@@ -251,7 +251,7 @@ import mlx_spqt
 class TestZigzagQMV(unittest.TestCase):
     def test_zigzag_qmv_sparse(self):
         # build inputs (single shape per Scope decision #3)
-        # quantize w; repack into zigzag layout via mlx_spqt.zigzag_repack
+        # produce zigzag-quantized weights via mlx_spqt.zigzag_quantize
         # build sparse mask + idx host-side (np.flatnonzero)
         # y_zz = mlx_spqt.zigzag_qmv(x, w_zz, scales_zz, biases_zz, idx)
         # y_ref = mx.quantized_matmul(x_sparse, w_q, scales, biases, transpose=True, ...)

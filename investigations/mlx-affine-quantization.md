@@ -111,7 +111,7 @@ Row i (4096 K-positions):
 
 **Same family, different encoding sophistication.** Q4_K spends its bits on a hierarchical scale-of-scales to compress metadata; MLX-affine just stores per-group scales in fp16. Same average bitrate falls out coincidentally.
 
-The flat-grouped form actually **simplifies the SpQt port** — no super-block / sub-block / 6-bit scale gymnastics in the repack.
+The flat-grouped form actually **simplifies the SpQt port** — no super-block / sub-block / 6-bit scale gymnastics in our `zigzag_quantize` step.
 
 ## 5. Kernel landscape
 
@@ -269,7 +269,7 @@ This is the kernel SpQt-MLX must break-even against in M3.
 
 1. **Path 2 (MLX-affine) is structurally equivalent to the paper's Q4_K target.** Same per-output-channel × group-along-K layout, same per-group asymmetric scale+offset math. SpQt's zigzag idea ports without conceptual translation.
 
-2. **The flat group structure simplifies the repack.** Q4_K's super-block + sub-block + 6-bit-scale hierarchy is collapsed in MLX-affine to one fp16 scale per 64 weights. Our `zigzag_repack` is therefore simpler than llama.cpp-SpQt's `rearrange_tensor_zigzag` — fewer encoding steps.
+2. **The flat group structure simplifies the quantize step.** Q4_K's super-block + sub-block + 6-bit-scale hierarchy is collapsed in MLX-affine to one fp16 scale per 64 weights. Our `zigzag_quantize` does fp-rearrange + quantize as one operation against this flatter format; llama.cpp-SpQt's reference does fp-rearrange (`rearrange_tensor_zigzag`) followed by the standard Q4_K quantizer (with its 6-bit-scale gymnastics).
 
 3. **The baseline is honest.** `qmv_fast` is the production GEMV most MLX-quantized LLMs hit at decode. Two-plus years of optimization PRs have gone into it. Break-even is a meaningful claim, not a synthetic comparison.
 

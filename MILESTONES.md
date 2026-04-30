@@ -76,7 +76,7 @@ to an MLX-native quantization format, validated by:
 | --- | ----------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | M0a | Structural map: ggml ↔ MLX           | One-page topics × {ggml, MLX, what we use} comparison; in its own doc; every row drives a downstream decision. |
 | M0b | Extension scaffold + trivial kernel  | axpby-cloned extension builds via `pip install -e .`; trivial Metal kernel registered as a `Primitive`, callable from Python; atomics + threadgroup-memory smoke kernels confirm M2 capabilities. |
-| M1  | `zigzag_repack` + dense zigzag-GEMV Metal kernel | `zigzag_repack(w_fp)` produces zigzag-quantized weights/scales/biases; dense zigzag-GEMV Metal kernel (multi-TG, atomic-reduce architecture) matches `mx.quantized_matmul` on the same weights to `(y - y_ref).abs().max() < 1e-3`. The kernel-design milestone. |
+| M1  | `zigzag_quantize` + dense zigzag-GEMV Metal kernel | `zigzag_quantize(w_fp)` produces zigzag-quantized weights/scales/biases; dense zigzag-GEMV Metal kernel (multi-TG, atomic-reduce architecture) matches `mx.quantized_matmul` on the same weights to `(y - y_ref).abs().max() < 1e-3`. The kernel-design milestone. |
 | M2  | Sparse-GEMV: M1 kernel + idx-driven K-walk | Take M1's kernel, replace contiguous K-walk with idx-driven walk. Correctness at 50% sparsity: `(y - y_ref).abs().max() < 1e-3`, single shape, host-built index buffer. |
 | M3  | Performance break-even               | SpQt-MLX qmv ≥ MLX stock `affine_qmv_fast` at 50% sparsity, same shape, same hardware.                  |
 | M4  | Turn-key repo                        | `python tests/test_spqt.py` reproduces both gates from a clean clone; README has install + run instructions. |
@@ -156,7 +156,7 @@ strings in CMake/setup files; the smoke kernels are tiny.
 Failing on the build environment is costly — verify the toolchain works before
 committing kernel-design time.
 
-### M1 — Zigzag repack + dense zigzag-GEMV kernel
+### M1 — `zigzag_quantize` + dense zigzag-GEMV kernel
 
 **This is the kernel-design milestone.** M1 builds the full multi-threadgroup,
 atomic-reducing kernel architecture for the zigzag layout — but for *dense* input
@@ -166,7 +166,7 @@ Splitting this way isolates *layout correctness* (M1) from *sparsity correctness
 
 **Two artifacts:**
 
-1. **`zigzag_repack(w: mx.array, group_size, bits) → (w_zz, scales_zz, biases_zz)`**
+1. **`zigzag_quantize(w: mx.array, group_size, bits) → (w_zz, scales_zz, biases_zz)`**
    — pure Python/MLX, no Metal. Operates on the **original (un-quantized) fp16/fp32**
    weight matrix; mirrors the signature shape of `mx.quantize(...)`. Internally
    does fp-rearrange-then-quantize (matches `rearrange_tensor_zigzag` at
@@ -208,7 +208,7 @@ The "Reuse" rows are M1/M2's non-divergence policy. Header includibility for
 
 ```python
 # w is the original fp16 weight matrix (single shape per Scope decision #3)
-w_zz, scales_zz, biases_zz = mlx_spqt.zigzag_repack(w, group_size=64, bits=4)
+w_zz, scales_zz, biases_zz = mlx_spqt.zigzag_quantize(w, group_size=64, bits=4)
 y_zz = mlx_spqt.dense_zigzag_qmv(x, w_zz, scales_zz, biases_zz)
 
 # reference: standard (non-zigzag) quantization of the same weights
