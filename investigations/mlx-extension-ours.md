@@ -29,6 +29,7 @@ End-to-end functional check: `cd extensions/mlx_spqt && python test.py` →
 | 3. SpQt dense GEMV kernel (M1) | ☐ | `zigzag_quantize` Python helper + dense zigzag-GEMV Metal kernel |
 | 4. SpQt sparse-GEMV (M2) | ☐ | idx-driven K-walk added to M1 kernel |
 | 5. Cleanup (M4) | ☐ | Drop `axpby/` subdirectory and its bindings |
+| 6. Upstream migration (out of scope) | ☐ | Future reference: how the extension would be promoted into MLX core |
 
 ---
 
@@ -188,19 +189,109 @@ the same pass.) Comment-only; no behavioral impact.
 
 ---
 
-## Phase 2 — MSL feature smoke kernels (M0b steps 2-7) ☐
+## Phase 2 — MSL feature smoke kernels (M0b steps 2-7) ✅
 
-*To be filled in as smoke kernels are added.* Per `MILESTONES.md` M0b detail,
-four smoke kernels gate the M2 design:
+Four smoke kernels added under `extensions/mlx_spqt/`, each in its own
+subdirectory mirroring axpby's pattern. All four pass their correctness
+gates. Per the Phase index above, M0b is now complete.
 
-- [ ] Atomic-add into `device atomic_float*` output
-- [ ] `threadgroup` memory + cross-simdgroup reduce
-- [ ] `uint32`-packed input round-trip
-- [ ] `#include "mlx/backend/metal/kernels/quantized.h"` + `qdot<…>` callable
+### What we built
 
-Each adds a new kernel under `extensions/mlx_spqt/`, registered through the
-shared `bindings.cpp` and built into the same metallib. axpby continues to
-work in parallel.
+| # | Subdir | Tests | M2 capability gated | Result |
+|---|---|---|---|---|
+| 1 | `smoke_uint32/` | `test_smoke_uint32.py` | `mx.array(dtype=mx.uint32)` round-trip; nibble extraction | nibbles 0..15 from `[0x76543210, 0xFEDCBA98]` round-trip correct |
+| 2 | `smoke_qdot/` | `test_smoke_qdot.py` | `qdot` / `load_vector` from `quantized.h` callable (Working Principle #4) | `out[0] = 120.0` (exact dot-product result) |
+| 3 | `smoke_atomic/` | `test_smoke_atomic.py` | cross-TG `atomic_fetch_add_explicit` on `device atomic_float*` | 256 TGs × 32 threads → `out[0] = 8192.0` exact (no contention loss) |
+| 4 | `smoke_threadgroup/` | `test_smoke_threadgroup.py` | within-TG cross-simdgroup reduce via `threadgroup` memory + `threadgroup_barrier` | 4 SGs × 32 lanes → `out[0] = 128.0` |
+
+Each smoke kernel has its own `Primitive` subclass, `eval_gpu`, and Metal
+source. axpby continues to work in parallel as the sanity baseline (per
+Scope decision #5).
+
+### Working Principle #4 verified
+
+The most important outcome: **`#include "mlx/backend/metal/kernels/quantized.h"`
+works from extension `.metal` source** when paired with the right transitive
+includes:
+
+```metal
+#include "mlx/backend/metal/kernels/utils.h"
+#include "mlx/backend/metal/kernels/steel/gemm/gemm.h"      // ← required for steel:: types
+#include "mlx/backend/metal/kernels/quantized_utils.h"      // ← required for elem_to_loc_broadcast etc.
+#include "mlx/backend/metal/kernels/quantized.h"
+```
+
+This is the same include pattern MLX itself uses in `quantized.metal:1-7`. With
+these in place, `qdot` / `load_vector` / `get_pack_factor` are all callable
+from our extension's source — M2 can use them directly without vendoring.
+
+### Failure modes encountered (lessons for M2)
+
+The four smoke kernels surfaced a variety of failure modes worth cataloging
+before M2's larger kernel work. Each was small and locally diagnosable —
+exactly the value of doing them as separate, focused exercises.
+
+**Build-system / CMake-level**
+
+| Failure | Diagnosis | Fix |
+|---|---|---|
+| `No rule to make target '.../smoke_xxx.metal$'` (stray `$`) | Editor inserted a stray character into CMakeLists path | Remove the `$`; CMake errors clearly identify the bad path |
+| `No rule to make target '.../smoke_uint32/smoke_qdot.metal'` | Wrong directory in path (copy-paste from sibling kernel) | Fix the subdir name in `mlx_build_metallib SOURCES` |
+| Stale metallib after `.metal` edits — kernel runs old code | CMake editable install doesn't always detect `.metal` changes | `rm -rf build && pip install -e . --force-reinstall --no-deps` for clean rebuild |
+| `'mlx/backend/metal/kernels/quantized.h' file not found` (initially expected; actually OK) | Path *is* on `MLX_INCLUDE_DIRS` but transitive deps aren't | Add `steel/gemm/gemm.h` and `quantized_utils.h` *before* `quantized.h` |
+| Build succeeds but runtime "Library not found: mlx_xxx.metallib" | `mlx_build_metallib(... TITLE ...)` doesn't match `d.get_library("...", ...)` string | Make them match; both layers' Metal-library-name must align |
+
+**Compile / language-level**
+
+| Failure | Diagnosis | Fix |
+|---|---|---|
+| `no member named 'set_constant_array' in 'CommandEncoder'` | Method doesn't exist; `set_bytes` is the right one for inline scalars | Use `set_bytes(value, idx)` for scalars; `set_input_array`/`set_output_array` for `mx::array`s |
+| `use of undeclared identifier 'atomic_fetch_add'` | MSL only has the `_explicit` variant of atomics | Use `atomic_fetch_add_explicit(out, val, memory_order_relaxed)` |
+| `no member named 'smoke_xxx' in namespace 'spqt_ext'` | Forgot to `#include "smoke_xxx/smoke_xxx.h"` in `bindings.cpp` | Add the include |
+| `duplicate symbol: spqt_ext::current_binary_dir` | Two `.cpp` files defining the same external-linkage helper | Wrap each copy in anonymous namespace for file-local linkage |
+| `mx::array(int, ...)`: shape constructor doesn't match `int` | `mx::Shape` is a vector type; needs `{N}` not `N` | Use brace-init `{N}` |
+| `use of undeclared identifier 'w_packed'` in `eval_gpu` | Stale copy-paste from a different smoke kernel; references nonexistent variables | Adapt op function and eval_gpu carefully per kernel; don't bulk-copy |
+| Wrong include `axpby/axpby.h` instead of own header | Copy-paste leftover | Use the correct `smoke_xxx/smoke_xxx.h` include |
+
+**Semantic / runtime**
+
+| Failure | Diagnosis | Fix |
+|---|---|---|
+| Output shape `(N,)` when only `out[0]` is written | Op function returned `{N}` instead of `{1}` | Either use `{1}` or use `out[0].item()` in tests |
+| `out.item()` raises "Only length-1 arrays can be converted" | Output shape isn't `(1,)` | Either fix the op function's shape, or use `out[0].item()` |
+| `dispatch_threadgroups` vs `dispatch_threads` confusion | `dispatch_threads(grid, tgp)` interprets `grid` as TOTAL threads; `dispatch_threadgroups(grid, tgp)` interprets `grid` as TG count | Pick the variant that matches your mental framing; we use `dispatch_threads` for "N output elements ⇒ N threads" |
+| Distribution name vs import name confusion in setup.py | `name=` is pip metadata; `packages=` is Python import name; can differ | Match them — `name="mlx_spqt"` and `packages=["mlx_spqt"]` |
+
+### General lessons applicable to M2
+
+1. **`pip install -e . --force-reinstall --no-deps` after `.metal` edits.** CMake's
+   editable-install dependency tracking on `.metal` files is unreliable. Force-rebuild
+   when in doubt; it's cheap (a few seconds) compared to debugging a stale-kernel mystery.
+
+2. **Buffer-slot consistency is the silent-corruption risk.** Mismatched `[[buffer(N)]]`
+   in `.metal` vs slot index in `set_*_array(arr, N)` produces no error; just garbage
+   output. Verify by treating the kernel signature and the eval_gpu binding as a single
+   contract and reviewing them together.
+
+3. **MSL atomics scale.** `atomic_fetch_add_explicit` is exact and lossless under
+   meaningful contention (256 TGs × 32 threads, all targeting the same cell). M2's
+   K-tiled architecture can rely on cross-TG atomic-add for row-partial reduction
+   without scaling concerns at our shape.
+
+4. **MLX's `qdot` / `load_vector` pair is callable from extensions.** Their math
+   semantics are intricate (especially the bit-position trick + pre-scaling for
+   `bits=4`), but they Just Work when called as a pair per MLX's canonical pattern.
+   Don't try to call `qdot` without the matching `load_vector` setup.
+
+5. **Don't bulk-copy `eval_gpu` between smoke kernels.** Each kernel has slightly
+   different inputs/outputs/dispatch geometry. Stale variable references and slot
+   indices are the most common bug class — visible at compile time, but tedious to
+   debug if you've copied 50 lines.
+
+6. **Failure modes are *local*.** Picking small, focused smoke kernels paid off — every
+   compile/runtime error was one or two lines wrong, with a clear diagnostic. Compare
+   to a hypothetical combined kernel where a single failure could be in any of four
+   features. The MILESTONES decision to split into four was the right one.
 
 ---
 
@@ -221,3 +312,51 @@ dense zigzag-GEMV Metal kernel. The kernel-design milestone.
 
 *To be filled in during M4.* Drop the `axpby/` subdirectory and its
 `bindings.cpp` registration. Final extension contains only SpQt code.
+
+---
+
+## Phase 6 — Upstream migration (out of scope; future reference)
+
+If `mlx_spqt` ever gets promoted into MLX core (e.g. as
+`mx.quantized_matmul(..., mode="affine_zigzag")`), the migration is
+well-scoped — most of our structural choices (Working Principle #4 mirroring
+`qmv_fast_impl`, the `Primitive` shape matching `QuantizedMatmul`, the
+`eval_gpu` pattern) make this a lift-and-shift rather than a rewrite.
+
+**Rough effort estimate:** ~8-15 hours of focused work.
+
+### Component-by-component migration map
+
+| Extension piece | Core counterpart | Difficulty |
+|---|---|---|
+| Metal kernel template | Insert into `mlx/backend/metal/kernels/quantized.{h,metal}` cascade | Low — already mirrors `qmv_fast_impl` patterns |
+| `eval_gpu` wrapper | New function in `mlx/backend/metal/quantized.cpp`, called from a dispatcher | Low — mirrors existing `qmv(...)` line-for-line |
+| `Primitive` subclass | Add `QuantizationMode::AffineZigzag` enum; extend `QuantizedMatmul`'s mode dispatch | Medium — touches `primitives.{h,cpp}` + `ops.cpp` |
+| Python op | Extend `mx.quantized_matmul(..., mode="affine_zigzag", idx=...)` with optional `idx` plumbing | Medium — API + plumbing through `ops.{h,cpp}` and `python/src/ops.cpp` |
+| `zigzag_quantize` (Python) | Port to C++ behind `mx.quantize(mode="affine_zigzag")` for consistency with the other quant modes | Medium — the largest single port |
+| Tests | Slot into `python/tests/test_quantized.py` following the `test_qmv` pattern | Trivial |
+| `bindings.cpp`, `CMakeLists.txt`, `setup.py`, `pyproject.toml`, `current_binary_dir()` | Deleted; MLX's existing machinery covers them | Trivial |
+
+### Two API design questions to settle
+
+1. **How to expose `idx`** in the public API:
+   - Option α: optional `idx` kwarg on `mx.quantized_matmul` (idiomatic; subtle API surface change).
+   - Option β: separate `mx.zigzag_quantized_matmul(...)` op (uglier but no public-API risk).
+
+2. **Where dense-zigzag vs. sparse-zigzag dispatch lives:** single
+   `mode="affine_zigzag"` with optional `idx`, or two modes
+   (`"affine_zigzag"` / `"affine_zigzag_sparse"`).
+
+Both questions are deferred. They wouldn't change the kernel work, only the
+public-facing wrapper.
+
+### Talk-friendly framing
+
+> Built as a registered MLX extension for the MVP. Upstream migration is
+> well-scoped (~8-15 hours, mostly mode-dispatch wiring); the kernel itself
+> slots into MLX's existing template structure unchanged. The
+> extension/core boundary was chosen deliberately so the MVP shipped quickly
+> and the upstream path isn't a rewrite.
+
+Maps cleanly onto the rubric's "minimal effort to MVP, clean path to
+production" framing.
