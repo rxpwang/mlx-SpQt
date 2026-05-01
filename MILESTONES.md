@@ -70,12 +70,23 @@ to an MLX-native quantization format, validated by:
    is bounded (~5-8h on top of the kernel work), not open-ended. The trade-off
    is +25-30% engineering time.
 
+5. **New top-level extension at `extensions/mlx_spqt/`; axpby retained as sanity
+   baseline through M0b–M2, dropped at M4.**
+   *Why a new extension*, not modifying `examples/extensions/`: keeps our diff
+   against upstream MLX purely additive and preserves axpby's role as MLX's
+   canonical extension example.
+   *Why retain axpby temporarily*: during scaffolding verification, a known-working
+   kernel inside our package decouples scaffold-failure modes from kernel-failure
+   modes. If `mlx_spqt.axpby(...)` works after the rename, the build / CMake /
+   metallib / runtime-path pipeline is sound — independent of any SpQt-specific code.
+   *When to drop*: as part of M4 cleanup. Final extension contains only SpQt code.
+
 ## Milestones
 
 | #   | Name                                | Done criterion                                                                                          |
 | --- | ----------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | M0a | Structural map: ggml ↔ MLX           | One-page topics × {ggml, MLX, what we use} comparison; in its own doc; every row drives a downstream decision. |
-| M0b | Extension scaffold + trivial kernel  | axpby-cloned extension builds via `pip install -e .`; trivial Metal kernel registered as a `Primitive`, callable from Python; atomics + threadgroup-memory smoke kernels confirm M2 capabilities. |
+| M0b | Extension scaffold + smoke kernels   | `extensions/mlx_spqt/` builds via `pip install -e .`; `mlx_spqt.axpby` (retained as sanity baseline) works after the rename; four smoke kernels (atomic-add, threadgroup memory, uint32 buffer, MLX-header includibility) pass their correctness checks. |
 | M1  | `zigzag_quantize` + dense zigzag-GEMV Metal kernel | `zigzag_quantize(w_fp)` produces zigzag-quantized weights/scales/biases; dense zigzag-GEMV Metal kernel (multi-TG, atomic-reduce architecture) matches `mx.quantized_matmul` on the same weights to `(y - y_ref).abs().max() < 1e-3`. The kernel-design milestone. |
 | M2  | Sparse-GEMV: M1 kernel + idx-driven K-walk | Take M1's kernel, replace contiguous K-walk with idx-driven walk. Correctness at 50% sparsity: `(y - y_ref).abs().max() < 1e-3`, single shape, host-built index buffer. |
 | M3  | Performance break-even               | SpQt-MLX qmv ≥ MLX stock `affine_qmv_fast` at 50% sparsity, same shape, same hardware.                  |
@@ -110,25 +121,38 @@ Principles for the deliverable:
 Done criterion: every row maps to a concrete downstream decision. Anything
 "interesting but unused" stays in `investigations/`, not in M0a.
 
-### M0b — Extension scaffold + trivial kernel
+### M0b — Extension scaffold + smoke kernels
 
-Per Scope decision #4, we go with the C++ extension route from the start. M0b stands
-up the scaffolding and a trivial kernel, then verifies the M2-specific MSL features.
-Reference template: `examples/extensions/axpby`.
+Per Scope decisions #4 and #5: stand up a new top-level extension at
+`extensions/mlx_spqt/` cloned from the axpby template. Keep the axpby kernel
+itself as a sanity baseline through development. Verify the build + Metal
+features that M2 will rely on.
 
-**Three artifacts:**
+Reference template: `examples/extensions/` (vanilla axpby — *not* modified).
+Walkthrough of every piece: `investigations/mlx-extension-axpby.md`.
 
-1. **Cloned extension scaffold.** Copy `examples/extensions/axpby` into our repo
-   (e.g. `extensions/mlx_spqt/`), find/replace `axpby` → `spqt` and `_ext` →
-   `_spqt_ext` across CMakeLists.txt, setup.py, pyproject.toml, bindings.cpp.
-   Verify: `pip install -e .` succeeds, the metallib builds.
+**Two artifacts:**
 
-2. **Trivial registered kernel.** Replace axpby's compute body with something simple
-   (e.g. `y = 2 * x`); keep the Primitive subclass + `eval_gpu` + bindings.
-   Verify: callable from Python, output matches reference, the kernel shows up as a
-   real registered op (not a `mx.fast.metal_kernel` JIT).
+1. **Cloned extension scaffold at `extensions/mlx_spqt/`.** Copy
+   `examples/extensions/` (the whole directory) to `extensions/mlx_spqt/`.
+   **Keep the `axpby/` subdirectory intact** — per Scope decision #5, axpby
+   travels with us as a sanity baseline. Find/replace **package-level**
+   identifiers only:
+   - `mlx_sample_extensions` → `mlx_spqt` (Python package dir + name)
+   - `_ext` → `_spqt_ext` (compiled module name)
+   - `mlx_ext` → `mlx_spqt` (metallib `TITLE` and `d.get_library(...)` argument)
+   - `mlx_ext_metallib` → `mlx_spqt_metallib` (CMake target name)
 
-3. **MSL feature smoke tests** (the parts not covered by axpby, that M2 relies on):
+   Files touched: `CMakeLists.txt`, `setup.py`, `pyproject.toml`, `bindings.cpp`,
+   the renamed Python package's `__init__.py`. **Don't rename `axpby/` itself**
+   — it's the verification anchor.
+
+   Verify after `pip install -e .`: `mlx_spqt.axpby(x, y, 2.0, 3.0)` produces
+   correct output.
+
+2. **MSL feature smoke kernels** — NEW kernels added alongside `axpby/` in our
+   extension. These get their own `.metal` source, Primitive subclasses, and
+   bindings. axpby continues to work in parallel.
 
    - [ ] **Atomic-add into output**: `atomic_fetch_add_explicit` on a `device atomic_float*`
          output. Required for cross-TG row-partial reduce.
@@ -146,15 +170,13 @@ Reference template: `examples/extensions/axpby`.
    Each is a ~30-line standalone kernel. If any blocks, M2 design must adapt
    (e.g. avoid cross-TG atomics by using one TG per output row).
 
-**Done criterion** (matches the row in the milestones table above):
-extension builds via `pip install -e .`; trivial kernel registered as a `Primitive`,
-callable from Python; the three smoke tests pass.
+**Done criterion**: `pip install -e extensions/mlx_spqt/` succeeds;
+`mlx_spqt.axpby(...)` confirms the scaffold; all four smoke kernels pass.
 
-**Effort estimate:** 3-4h scaffold + smoke tests. Most of the time is renaming
-strings in CMake/setup files; the smoke kernels are tiny.
-
-Failing on the build environment is costly — verify the toolchain works before
-committing kernel-design time.
+**Effort estimate:** 3-4h scaffold + smoke kernels. Most of the time is renaming
+strings in CMake/setup files; the smoke kernels are tiny. Build-environment
+issues (Metal toolchain, MLX headers) are the largest tail — fail-fast in the
+scaffold step.
 
 ### M1 — `zigzag_quantize` + dense zigzag-GEMV kernel
 
@@ -339,6 +361,11 @@ is the bar.
 
 - `README.md`: install + one-command repro of both gates.
 - `tests/test_spqt.py`: M2 correctness + M3 perf, prints pass/fail.
+- **Drop the `axpby/` sanity baseline from `extensions/mlx_spqt/`.** Per Scope
+  decision #5, axpby travels with us through M0b–M2 as a verification anchor;
+  M4 is when the final extension gets cleaned to contain only SpQt code. Remove
+  the `axpby/` subdirectory, its `bindings.cpp` registration, and its CMakeLists
+  entries.
 - Clean diff between `main` (vanilla upstream MLX) and `rxpwang/spqt` — the diff
   *is* the deliverable; should tell the porting story end-to-end.
 
