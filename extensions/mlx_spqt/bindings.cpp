@@ -148,6 +148,8 @@ NB_MODULE(_spqt_ext, m) {
         "biases"_a,
         "group_size"_a = 64,
         "bits"_a = 4,
+        "num_simdgroups"_a = 2,
+        "threadgroups_per_band"_a = 4,
         nb::kw_only(),
         "stream"_a = nb::none(),
         R"(
@@ -161,7 +163,8 @@ NB_MODULE(_spqt_ext, m) {
                 biases (array): zigzag biases, shape (M/gs, K), dtype fp16.
                 group_size (int): size of zigzag groups (gs).
                 bits (int): number of bits per quantized weight.
-    
+                num_simdgroups (int): number of SIMD groups.
+                threadgroups_per_band (int): number of thread groups per band.
             Returns:
                 array: result of the matrix-vector multiplication as float32, shape (B, M).
         )");

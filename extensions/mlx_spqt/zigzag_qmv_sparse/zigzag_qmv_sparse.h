@@ -34,6 +34,8 @@ mx::array zigzag_qmv_sparse(
     const mx::array& biases,
     int group_size = 64,
     int bits = 4,
+    int num_simdgroups = 4,
+    int threadgroups_per_band = 4,
     mx::StreamOrDevice s = {}
 );
 
@@ -43,8 +45,8 @@ mx::array zigzag_qmv_sparse(
 
 class ZigzagQmvSparse : public mx::Primitive {
  public:
-  explicit ZigzagQmvSparse(mx::Stream stream, int group_size, int bits)
-      : mx::Primitive(stream), group_size_(group_size), bits_(bits) {};
+  explicit ZigzagQmvSparse(mx::Stream stream, int group_size, int bits, int num_simdgroups, int threadgroups_per_band)
+      : mx::Primitive(stream), group_size_(group_size), bits_(bits), num_simdgroups_(num_simdgroups), threadgroups_per_band_(threadgroups_per_band) {};
 
   /**
    * A primitive must know how to evaluate itself on the CPU/GPU
@@ -94,6 +96,8 @@ class ZigzagQmvSparse : public mx::Primitive {
  private:
   int group_size_;
   int bits_;
+  int num_simdgroups_;
+  int threadgroups_per_band_;
 };
 
 

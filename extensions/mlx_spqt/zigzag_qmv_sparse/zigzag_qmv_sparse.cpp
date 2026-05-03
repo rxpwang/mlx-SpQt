@@ -61,6 +61,8 @@ mx::array zigzag_qmv_sparse(
     const mx::array& biases,
     int group_size,
     int bits,
+    int num_simdgroups,
+    int threadgroups_per_band,
     mx::StreamOrDevice s
 ) {
 
@@ -75,7 +77,7 @@ mx::array zigzag_qmv_sparse(
       /* const mx::Shape& shape = */ out_shape,
       /* mx::Dtype dtype = */ mx::float32,
       /* std::shared_ptr<mx::Primitive> primitive = */
-      std::make_shared<ZigzagQmvSparse>(to_stream(s), group_size, bits),
+      std::make_shared<ZigzagQmvSparse>(to_stream(s), group_size, bits, num_simdgroups, threadgroups_per_band),
       /* const std::vector<mx::array>& inputs = */ {w_zz, x, scales, biases, sparse_indices});
 }
 
@@ -125,7 +127,7 @@ void ZigzagQmvSparse::eval_gpu(
     // auto kernel = d.get_kernel("zigzag_qmv_dense_half_gs64_b4_NSG4_TG4", lib);
     std::string kname;
     kname.reserve(64);
-    mx::concatenate(kname, "zigzag_qmv_sparse_half", "_gs_", group_size_, "_b_", bits_, "_nsg_", num_simdgroups, "_tg_", threadgroups_per_band);
+    mx::concatenate(kname, "zigzag_qmv_sparse_half", "_gs_", group_size_, "_b_", bits_, "_nsg_", num_simdgroups_, "_tg_", threadgroups_per_band_);
     auto kernel = d.get_kernel(kname, lib);
 
     // zero-fill output buffer (since the kernel will be doing atomic adds)
@@ -158,8 +160,8 @@ void ZigzagQmvSparse::eval_gpu(
     const int M = out.shape(-1);
  
     // dispatch threads
-    MTL::Size group_dims = MTL::Size(num_simdgroups * simdgroup_size, 1, 1);
-    MTL::Size grid_dims = MTL::Size(M / group_size_, threadgroups_per_band, 1);
+    MTL::Size group_dims = MTL::Size(num_simdgroups_ * simdgroup_size, 1, 1);
+    MTL::Size grid_dims = MTL::Size(M / group_size_, threadgroups_per_band_, 1);
     compute_encoder.dispatch_threadgroups(grid_dims, group_dims);
 }
 
@@ -205,7 +207,7 @@ std::pair<std::vector<mx::array>, std::vector<int>> ZigzagQmvSparse::vmap(
 /** Equivalence check **/
 bool ZigzagQmvSparse::is_equivalent(const Primitive& other) const {
   const ZigzagQmvSparse& r_other = static_cast<const ZigzagQmvSparse&>(other);
-  return group_size_ == r_other.group_size_ && bits_ == r_other.bits_;
+  return group_size_ == r_other.group_size_ && bits_ == r_other.bits_ && num_simdgroups_ == r_other.num_simdgroups_ && threadgroups_per_band_ == r_other.threadgroups_per_band_;
 }
 
 } // namespace spqt_ext
