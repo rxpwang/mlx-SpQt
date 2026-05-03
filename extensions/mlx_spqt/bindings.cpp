@@ -9,6 +9,7 @@
 #include "smoke_atomic/smoke_atomic.h"
 #include "smoke_threadgroup/smoke_threadgroup.h"
 #include "zigzag_qmv_dense/zigzag_qmv_dense.h"
+#include "zigzag_qmv_sparse/zigzag_qmv_sparse.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -127,6 +128,34 @@ NB_MODULE(_spqt_ext, m) {
     
             Args:
                 x (array): activations, shape (B, K), dtype fp16.
+                w_zz (array): zigzag-packed weights, shape (M/gs, K/gs, gs*bits/32), dtype uint32.
+                scales (array): zigzag scales, shape (M/gs, K), dtype fp16.
+                biases (array): zigzag biases, shape (M/gs, K), dtype fp16.
+                group_size (int): size of zigzag groups (gs).
+                bits (int): number of bits per quantized weight.
+    
+            Returns:
+                array: result of the matrix-vector multiplication as float32, shape (B, M).
+        )");
+
+    m.def(
+        "zigzag_qmv_sparse",
+        &spqt_ext::zigzag_qmv_sparse,
+        "x"_a,
+        "sparse_indices"_a,
+        "w_zz"_a,
+        "scales"_a,
+        "biases"_a,
+        "group_size"_a = 64,
+        "bits"_a = 4,
+        nb::kw_only(),
+        "stream"_a = nb::none(),
+        R"(
+            Perform a zigzag-ordered quantized matrix-vector multiplication with a matrix and a sparse vector with a index array indicating the non-zero positions.
+    
+            Args:
+                x (array): activations, shape (B, K), dtype fp16.
+                sparse_indices (array): indices of non-zero elements in the sparse vector, shape (B, K), dtype int32.
                 w_zz (array): zigzag-packed weights, shape (M/gs, K/gs, gs*bits/32), dtype uint32.
                 scales (array): zigzag scales, shape (M/gs, K), dtype fp16.
                 biases (array): zigzag biases, shape (M/gs, K), dtype fp16.

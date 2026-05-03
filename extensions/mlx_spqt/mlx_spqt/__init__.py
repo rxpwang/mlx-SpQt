@@ -9,6 +9,7 @@ from ._spqt_ext import (
     smoke_atomic,
     smoke_threadgroup,
     zigzag_qmv_dense,
+    zigzag_qmv_sparse,
 )
 
 from .quantization import quantize_zigzag, dequantize_zigzag
@@ -21,6 +22,7 @@ __all__ = [
     "smoke_atomic",
     "smoke_threadgroup",
     "zigzag_qmv_dense",
+    "zigzag_qmv_sparse",
     # quantization helpers
     "quantize_zigzag",
     "dequantize_zigzag",
