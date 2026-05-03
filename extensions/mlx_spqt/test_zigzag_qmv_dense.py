@@ -1,13 +1,23 @@
 import mlx.core as mx
 import mlx_spqt
 
-def test_zigzag_qmv_dense():
+SHAPES = [
+    (1024, 1024),
+    (2048, 2048),                                                                                          
+    (4096, 4096),
+    (8192, 8192),                                                                                          
+    (4096, 11008),
+    (11008, 4096),
+    (4096, 16384),
+]
+
+def test_zigzag_qmv_dense(M, K):
     """M1 done criterion: dense zigzag-GEMV matches dequantize-then-fp-matmul.
                                                                                                              
       Per investigations/M1-zigzag-layout.md §7. Threshold mirrors MLX's own
       test_quantized.py::test_qmv (1e-3 in fp32).                                                            
     """    
-    M, K = 4096, 4096
+    #M, K = 4096, 4096
     group_size, bits = 64, 4
 
     mx.random.seed(42)
@@ -36,5 +46,7 @@ def test_zigzag_qmv_dense():
     assert err < 1e-3, f"Max absolute error {err} exceeds expected threshold for zigzag GEMV"
 
 if __name__ == "__main__":
-    test_zigzag_qmv_dense()
+    for M, K in SHAPES:
+        print(f"Testing zigzag_qmv_dense with shape M={M}, K={K}...")
+        test_zigzag_qmv_dense(M, K)
     print("zigzag_qmv_dense test passed!")

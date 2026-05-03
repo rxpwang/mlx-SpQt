@@ -24,10 +24,20 @@ import mlx_spqt
 from time_utils import time_fn              
 
 LOOPS = 32       # chained kernel calls per timed iter (amortizes eval overhead)                           
-M, K = 4096, 4096                                                                                          
+#M, K = 4096, 4096                                                                                          
 GS, BITS = 64, 4 
 
-def main():
+SHAPES = [
+    (1024, 1024),
+    (2048, 2048),
+    (4096, 4096),
+    (8192, 8192),
+    (4096, 11008),
+    (11008, 4096),                                                                                         
+    (4096, 16384),
+]       
+
+def bench_shape(M, K):
     mx.random.seed(42)
     w = mx.random.normal(shape=(M, K)).astype(mx.float16)
     x = mx.random.normal(shape=(1, K)).astype(mx.float16)
@@ -58,18 +68,23 @@ def main():
             y = y + x @ w_dq.T
         return y
     
-    print(f"shape: M={M}, K={K}, group_size={GS}, bits={BITS}, loops={LOOPS}")
-    print("(reported time is per chained-fn call, divide by LOOPS for per-kernel time)")
+    print(f"shape: M={M}, K={K}")
+    #print("(reported time is per chained-fn call, divide by LOOPS for per-kernel time)")
 
     for _ in range(50):                                                                                      
         mx.eval(run_zigzag(x))                                                                                 
         mx.eval(run_mlx_qmv(x))                                                                                
         mx.eval(run_fp_matmul(x))
     mx.synchronize()      
-    
+
     time_fn(run_zigzag, x, msg="zigzag_qmv_dense (ours)")
     time_fn(run_mlx_qmv, x, msg="mx.quantized_matmul (baseline)")
     time_fn(run_fp_matmul, x, msg="x @ w_dq.T (fp16)")
+
+def main():
+    print(f"group_size={GS}, bits={BITS}, loops={LOOPS}")
+    for M, K in SHAPES:
+        bench_shape(M, K)
 
 if __name__ == "__main__":
     main()

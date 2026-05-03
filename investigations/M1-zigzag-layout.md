@@ -35,7 +35,7 @@ dequantize-then-fp-matmul reference.
 | Decision | Value | Why |
 |---|---|---|
 | Threadgroup pattern | SpQt-reference-style: multiple SGs per TG split K-walk; within-TG reduce sums per-row partials across SGs | Higher per-TG occupancy (4 SG vs. 2 in qmv_fast-style), lower atomic contention (4 TGs/band vs. 8), better data locality per SG. Reuses M0b smoke #4's threadgroup-reduce pattern. |
-| Threadgroup geometry | 4 SG × 32 lanes = 128 threads/TG; `rows_per_lane` = `group_size / SIMD_SIZE` = 2; 4 TGs per band | Mirrors llama.cpp-SpQt's per-TG SG count. `num_simdgroups` and `TGs_per_band` are M3-tunable knobs. |
+| Threadgroup geometry | 4 SG × 32 lanes = 128 threads/TG; `packs_per_thread = 4` so `values_per_thread = 32` rows per lane per outer iter; lane grid 16 × 2 (K-pos × row-chunk) within each SG; 4 TGs per band | Mirrors llama.cpp-SpQt's per-TG SG count. `(num_simdgroups, threadgroups_per_band)` and `packs_per_thread` are tunable knobs; bench across (2,2),(2,4),(4,2),(4,4),(4,8),(8,2) showed no significant differences (memory-bound regime at production shapes). |
 | `qdot` reuse | **No** — write custom inner loop | Per `mlx-qmv-fast.md` §8: qdot's "16 weights → 1 accumulator" can't service multiple row-partials per K-position |
 | Within-TG reduction | `threadgroup atomic<int>` + `SCALE_FACTOR = 2^16` (Option I'); each lane scales partials, atomic_fetch_add as int into shared TG-mem; barrier; first 64 threads atomic_load + unscale + atomic_fetch_add to global y | MSL doesn't support `threadgroup atomic<float>` (float atomics are device-only); int+SCALE_FACTOR is the canonical workaround per llama.cpp-SpQt (`ggml-metal.metal:5680`). 2^16 gives ~1.5e-5 absolute precision per scaled add with ~1000× int32 overflow margin. Cuts cross-TG atomic-float contention 32× (128 → 4 per row). |
 | Cross-TG reduction | `atomic_fetch_add_explicit` on `device atomic<float>* y` | M0b smoke #3 verified scales lossless to 256 TGs × 32 threads |
@@ -652,56 +652,122 @@ the no-reduce baseline due to SCALE_FACTOR rounding, but well under the
 **Planned**: 1 lane = `rows_per_lane = group_size / SIMD_SIZE = 2` rows; outer
 loop iterates K_per_sg = 256 K-positions.
 
-**As built**: 1 lane = `values_per_thread = 16` rows per outer iter; lanes are
-arranged as an 8 × 4 (K-position × row-chunk) grid within each SG; outer
-loop iterates 32 times (each lane covers 32 distinct K-positions).
+**As built (after `packs_per_thread = 4` tuning)**: 1 lane = `values_per_thread =
+pack_factor × packs_per_thread = 32` rows per outer iter; lanes are arranged
+as a 16 × 2 (K-position × row-chunk) grid within each SG; outer loop iterates
+16 times (each lane covers 16 distinct K-positions).
 
 **Lane assignment**:
 
 ```
-                K-pos 0   K-pos 1   K-pos 2   K-pos 3   K-pos 4   K-pos 5   K-pos 6   K-pos 7
-row chunk 0     lane 0    lane 4    lane 8    lane 12   lane 16   lane 20   lane 24   lane 28
-row chunk 1     lane 1    lane 5    lane 9    lane 13   lane 17   lane 21   lane 25   lane 29
-row chunk 2     lane 2    lane 6    lane 10   lane 14   lane 18   lane 22   lane 26   lane 30
-row chunk 3     lane 3    lane 7    lane 11   lane 15   lane 19   lane 23   lane 27   lane 31
+                K-pos 0   K-pos 1   K-pos 2   ...   K-pos 14   K-pos 15
+row chunk 0     lane 0    lane 2    lane 4    ...   lane 28    lane 30
+row chunk 1     lane 1    lane 3    lane 5    ...   lane 29    lane 31
 ```
 
-K-position index = `simd_lid / 4`; row-chunk index = `simd_lid % 4` (or
+K-position index = `simd_lid / 2`; row-chunk index = `simd_lid % 2` (or
 equivalently `simd_lid * values_per_thread % group_size / values_per_thread`).
-Each lane owns 16 rows × 32 K-positions over the full outer loop.
+Each lane owns 32 rows × 16 K-positions over the full outer loop.
 
-This is closer to a qmv_fast-style "many K-positions per thread" pattern,
-adapted for zigzag's row-chunk structure. The inner loop loads 1
-`(x, scale, bias)` per outer iter (one K-position) and unpacks 16 nibbles
-from 4 uint16 reads (the lane's 16 rows at that K-position).
+This is a qmv_fast-style "many K-positions per thread" pattern, adapted
+for zigzag's row-chunk structure. The inner loop loads 1 `(x, scale, bias)`
+per outer iter (one K-position) and unpacks 32 nibbles from 8 uint16 reads
+(the lane's 32 rows at that K-position).
+
+### Optimization 1 — Bias hoist (qmv_fast's qdot pattern)
+
+The dequant math factors as
+`acc[r] += x[k] * scale[k] * nibble[r] + x[k] * bias[k]`. The bias term
+**doesn't depend on r** — it's the same value contributing to every row
+the lane handles. Initially we added `x_bias_cur` 16 times per outer iter
+(once per row's `acc` slot). Now: accumulate it into a single `bias_total`
+register over the K-walk, apply to all 32 row-partials once at the end.
+
+Inner-loop arithmetic drops from `16 FMAs + 16 ADDs` to `16 FMAs` — about
+a 45% reduction. (Mirrors what qmv_fast's `qdot` does internally:
+`scale * dot + bias * sum_x`.)
+
+### Optimization 2 — `packs_per_thread = 4` (was 2)
+
+Each lane handles 32 rows × 1 K-pos per outer iter (was 16 × 1). Outer
+iter count halves from 32 to 16 per SG. Trades register pressure (acc[32]
+vs acc[16]) for fewer iters and better instruction-level parallelism.
+
+### Multi-shape benchmark findings
+
+Bench across LLM-relevant shapes (per-kernel μs at LOOPS=32, best of 3
+runs after thermal stabilization):
+
+| (M, K) | weights | zigzag (μs) | mx.quantized_matmul (μs) | naive fp_matmul (μs) | **zigzag / mlx_qmv** |
+|---|---|---|---|---|---|
+| (1024, 1024) | 0.5 MB | 13 | 11 | 12 | **1.11×** |
+| (2048, 2048) | 2 MB | 19 | 15 | 30 | 1.25× |
+| (4096, 4096) | 8 MB | 56 | 42 | 153 | 1.33× |
+| (8192, 8192) | 32 MB | 181 | 168 | 558 | **1.07×** |
+| (4096, 11008) | 22 MB | 122 | 115 | 387 | **1.06×** |
+| (11008, 4096) | 22 MB | 121 | 113 | 381 | **1.07×** |
+| (4096, 16384) | 32 MB | 173 | 169 | 562 | **1.02×** |
+
+**Key finding: the gap closes at large shapes.** At ≤8 MB weight matrices
+we're 1.1-1.3× slower than `mx.quantized_matmul` (per-dispatch overhead
+dominates); at ≥22 MB (LLM FFN shapes) we converge to 1.02-1.07×. At
+production-shape memory-bound kernels we're essentially parity with MLX's
+hand-tuned baseline. The 1.30× gap at (4096, 4096) reflects setup overhead,
+not steady-state work.
+
+3-4× faster than naive dequant+matmul across all shapes.
+
+Memory-bandwidth check at (8192, 8192): zigzag ~177 GB/s, mx.quantized_matmul
+~190 GB/s, both ~50-60% of M-series unified memory peak. Both kernels are
+firmly memory-bound at production sizes.
 
 ### What's deferred for future optimization
 
-The current kernel is a **working draft** — correct but not optimized:
+The current kernel is essentially **memory-bound at production shapes**;
+remaining knobs have diminishing returns:
 
-- **Within-SG `simd_sum` reduce**: across SGs, lanes 0/4/8/12/... all
+- **Within-SG `simd_sum` reduce**: across SGs, lanes 0/2/4/... all
   contribute partials for the same row chunk via separate atomic_int adds.
   A `simd_sum`-style cross-lane reduce within each SG would coalesce these
   before the threadgroup atomic, reducing TG-atomic ops from 32 per slot
-  per TG to 4 per slot per TG. Modest speedup expected; needs SG-internal
-  geometry change.
-- **Optimal `(num_simdgroups, threadgroups_per_band)`**: currently `(4, 4)`.
-  Reducing TGs/band cuts cross-TG atomic ops further; (4, 2) gives 2 atoms
-  per row at the cost of half the M-axis parallelism. M3 perf-tuning
-  territory.
-- **`load_vector`-style activation amortization**: not used; could load a
-  K-block of activations once and reuse across multiple K-positions.
+  per TG to ~4 per slot per TG. Likely modest speedup at large shapes
+  (already memory-bound); could matter more at small shapes where overhead
+  matters.
+- **Optimal `(num_simdgroups, threadgroups_per_band)`**: tested combos
+  (2,2), (2,4), (4,2), (4,4), (4,8), (8,2) — no significant differences,
+  confirming memory-bound regime. Currently locked at (4, 4).
+- **`load_vector`-style activation amortization**: not used; small
+  potential win if instruction-issue rate is secondary bottleneck.
 - **Multi-batch (B>1)**: kernel signature doesn't include batch stride;
   would need `out_vec_size`-equivalent and a batch dim in the grid.
 
 ### Done criterion verification
 
-Test `extensions/mlx_spqt/test_zigzag_qmv_dense.py` passes with `err < 1e-3`.
-Specifically: `max abs err = 9.2e-5` against an fp32-precision reference
-(scales/biases cast to fp32 before `dequantize_zigzag` to avoid fp16
-truncation in the reference itself; the original fp16-truncated reference
-would show 0.047 absolute error, dominated by the reference's own fp16
-precision loss, not kernel error).
+Multi-shape correctness verified across all 7 shapes in the bench. Max
+abs error 4.6e-4 to 6.4e-4, comfortably below 1e-3 threshold:
+
+| Shape | abs err |
+|---|---|
+| (1024, 1024) | 5.5e-4 |
+| (2048, 2048) | 4.6e-4 |
+| (4096, 4096) | 6.3e-4 |
+| (8192, 8192) | 6.4e-4 |
+| (4096, 11008) | 5.5e-4 |
+| (11008, 4096) | 5.6e-4 |
+| (4096, 16384) | 5.3e-4 |
+
+Errors are roughly **shape-independent** rather than scaling with K.
+Reason: the SCALE_FACTOR=2^16 truncation budget is bounded by the
+reduction structure (~128 atomic-int contributions per row, regardless
+of K), not by K-walk length. Each lane produces ONE atomic-int
+contribution per kernel launch, so error scales with the number of
+contributing lanes, not with K.
+
+The reference is fp32-precision (scales/biases cast to fp32 before
+`dequantize_zigzag` to avoid fp16 truncation in the reference itself;
+the original fp16-truncated reference would show 0.047 absolute error
+at (4096, 4096), dominated by the reference's own fp16 precision loss,
+not kernel error).
 
 ## 12. Implementation experience — lessons captured
 

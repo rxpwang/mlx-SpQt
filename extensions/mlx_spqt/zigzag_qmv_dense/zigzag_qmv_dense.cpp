@@ -113,9 +113,17 @@ void ZigzagQmvDense::eval_gpu(
     // allocate output buffer on the device
     out.set_data(mx::allocator::malloc(out.nbytes()));
 
+    constexpr int num_simdgroups = 4;
+    constexpr int threadgroups_per_band = 4;
+    constexpr int simdgroup_size = 32;
+
     // Load the Metal library and get the kernel function
     auto lib = d.get_library("mlx_spqt", current_binary_dir());
-    auto kernel = d.get_kernel("zigzag_qmv_dense_half_gs64_b4_NSG4_TG4", lib);
+    // auto kernel = d.get_kernel("zigzag_qmv_dense_half_gs64_b4_NSG4_TG4", lib);
+    std::string kname;
+    kname.reserve(64);
+    mx::concatenate(kname, "zigzag_qmv_dense_half", "_gs_", group_size_, "_b_", bits_, "_nsg_", num_simdgroups, "_tg_", threadgroups_per_band);
+    auto kernel = d.get_kernel(kname, lib);
 
     // zero-fill output buffer (since the kernel will be doing atomic adds)
     {
@@ -140,9 +148,9 @@ void ZigzagQmvDense::eval_gpu(
     const int K = x.shape(-1);
     compute_encoder.set_bytes(K, 5);
 
-    constexpr int num_simdgroups = 4;
-    constexpr int threadgroups_per_band = 4;
-    constexpr int simdgroup_size = 32;
+    // constexpr int num_simdgroups = 4;
+    // constexpr int threadgroups_per_band = 4;
+    // constexpr int simdgroup_size = 32;
     const int M = out.shape(-1);
  
     // dispatch threads

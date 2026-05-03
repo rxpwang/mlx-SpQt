@@ -34,7 +34,7 @@ template <typename T, int group_size, int bits, int num_simdgroups, int threadgr
 
     const uint thread_id = simd_gid * 32 + simd_lid;  
     
-    constexpr int packs_per_thread = bits == 2 ? 1 : 2;
+    constexpr int packs_per_thread = 4; //bits == 2 ? 1 : 2;
     //constexpr int num_simdgroups = num_simdgroups; 
     constexpr int results_per_simdgroup = group_size; // each simdgroup will only work on 1 band of group_size rows final results.
     constexpr int pack_factor = get_pack_factor<bits, 32>();
@@ -59,7 +59,8 @@ template <typename T, int group_size, int bits, int num_simdgroups, int threadgr
 
     // local result accumulator in registers for each thread.
     float acc[values_per_thread] = {0.0f}; // each thread accumulates values_per_thread output elements. 
-    
+    float bias_total = 0.0f; // accumulate total bias for the thread, since bias is shared across the group of rows that the thread works on, we can accumulate it in the innermost loop together with multiplication to better utilize the accumulated value before writing to shared memory.
+
     // compute the starting row index for this threadgroup
     int band_id = tid.x; // each threadgroup works on one band of rows, and each band has group_size rows.
     int row_start = band_id * group_size;
@@ -87,19 +88,27 @@ template <typename T, int group_size, int bits, int num_simdgroups, int threadgr
         float x_cur = x[0];
         float x_scale_cur = x_cur * scales_zz[0]; // apply scale to x. since quantized weight will be multiplied with x, we can apply the scale to x directly.
         float x_bias_cur = x_cur * biases_zz[0]; // apply bias to x. this is an approximation to adding bias after multiplication, but it allows us to reuse the same accumulation for different groups of rows that share the same scale and bias, which is necessary for efficiency.
+        bias_total += x_bias_cur; // accumulate bias for the thread. since bias is shared across the group of rows that the thread works on, we can accumulate it in the innermost loop together with multiplication to better utilize the accumulated value before writing to shared memory.
+
         // load and unpack weigths. currently 4 bits
         const device uint16_t* w_cur = (const device uint16_t*)ws; // load 16 bytes (128 bits) of weights, which corresponds to 32 values for 4-bit quantization.
         for (int i = 0; i < values_per_thread / 4; i++) {
-            acc[i*4 + 0] += x_scale_cur * (w_cur[i] & 0x000f) + x_bias_cur; // add bias in the innermost loop to better utilize the accumulated value before writing to shared memory, since different groups of rows share the same bias and scale.
-            acc[i*4 + 1] += x_scale_cur * ((w_cur[i] & 0x00f0) >> 4) + x_bias_cur;
-            acc[i*4 + 2] += x_scale_cur * ((w_cur[i] & 0x0f00) >> 8) + x_bias_cur;
-            acc[i*4 + 3] += x_scale_cur * ((w_cur[i] & 0xf000) >> 12) + x_bias_cur;
+            acc[i*4 + 0] += x_scale_cur * (w_cur[i] & 0x000f); //+ x_bias_cur; // add bias in the innermost loop to better utilize the accumulated value before writing to shared memory, since different groups of rows share the same bias and scale.
+            acc[i*4 + 1] += x_scale_cur * ((w_cur[i] & 0x00f0) >> 4); //+ x_bias_cur;
+            acc[i*4 + 2] += x_scale_cur * ((w_cur[i] & 0x0f00) >> 8); //+ x_bias_cur;
+            acc[i*4 + 3] += x_scale_cur * ((w_cur[i] & 0xf000) >> 12); //+ x_bias_cur;
         }
         // move pointers for the next loop iteration. 
         x += values_per_thread * 32 / group_size; 
         ws += values_per_thread * 32 * bits / 8;
         scales_zz += values_per_thread * 32 / group_size;
         biases_zz += values_per_thread * 32 / group_size;
+    }
+
+    // apply bias_total to all rows once at the end.
+    #pragma unroll
+    for (int i = 0; i < values_per_thread; i++) {
+        acc[i] += bias_total;
     }
 
     // write the accumulated results to shared memory atomically.
@@ -122,8 +131,68 @@ template <typename T, int group_size, int bits, int num_simdgroups, int threadgr
     }
 }
 
-template [[host_name("zigzag_qmv_dense_half_gs64_b4_NSG4_TG4")]]
+template [[host_name("zigzag_qmv_dense_half_gs_64_b_4_nsg_4_tg_4")]]
 [[kernel]] void zigzag_qmv_dense_impl<half, 64, 4, 4, 4>(
+    device const uint32_t*      w_zz      [[buffer(0)]],
+    device const half*          x         [[buffer(1)]],
+    device const half*          scales_zz [[buffer(2)]],
+    device const half*          biases_zz [[buffer(3)]],
+    device atomic<float>*       out       [[buffer(4)]],
+    constant const int&         K         [[buffer(5)]],
+    uint3  tid        [[threadgroup_position_in_grid]],
+    uint   simd_gid   [[simdgroup_index_in_threadgroup]],
+    uint   simd_lid   [[thread_index_in_simdgroup]]); 
+
+template [[host_name("zigzag_qmv_dense_half_gs_64_b_4_nsg_2_tg_2")]]
+[[kernel]] void zigzag_qmv_dense_impl<half, 64, 4, 2, 2>(
+    device const uint32_t*      w_zz      [[buffer(0)]],
+    device const half*          x         [[buffer(1)]],
+    device const half*          scales_zz [[buffer(2)]],
+    device const half*          biases_zz [[buffer(3)]],
+    device atomic<float>*       out       [[buffer(4)]],
+    constant const int&         K         [[buffer(5)]],
+    uint3  tid        [[threadgroup_position_in_grid]],
+    uint   simd_gid   [[simdgroup_index_in_threadgroup]],
+    uint   simd_lid   [[thread_index_in_simdgroup]]); 
+
+template [[host_name("zigzag_qmv_dense_half_gs_64_b_4_nsg_4_tg_2")]]                                       
+[[kernel]] void zigzag_qmv_dense_impl<half, 64, 4, 4, 2>(
+    device const uint32_t*      w_zz      [[buffer(0)]],
+    device const half*          x         [[buffer(1)]],
+    device const half*          scales_zz [[buffer(2)]],
+    device const half*          biases_zz [[buffer(3)]],
+    device atomic<float>*       out       [[buffer(4)]],
+    constant const int&         K         [[buffer(5)]],
+    uint3  tid        [[threadgroup_position_in_grid]],
+    uint   simd_gid   [[simdgroup_index_in_threadgroup]],
+    uint   simd_lid   [[thread_index_in_simdgroup]]);                            
+                                                                                                            
+template [[host_name("zigzag_qmv_dense_half_gs_64_b_4_nsg_4_tg_8")]]                                       
+[[kernel]] void zigzag_qmv_dense_impl<half, 64, 4, 4, 8>(
+    device const uint32_t*      w_zz      [[buffer(0)]],
+    device const half*          x         [[buffer(1)]],
+    device const half*          scales_zz [[buffer(2)]],
+    device const half*          biases_zz [[buffer(3)]],
+    device atomic<float>*       out       [[buffer(4)]],
+    constant const int&         K         [[buffer(5)]],
+    uint3  tid        [[threadgroup_position_in_grid]],
+    uint   simd_gid   [[simdgroup_index_in_threadgroup]],
+    uint   simd_lid   [[thread_index_in_simdgroup]]);                                     
+                                                                                                            
+template [[host_name("zigzag_qmv_dense_half_gs_64_b_4_nsg_2_tg_4")]]
+[[kernel]] void zigzag_qmv_dense_impl<half, 64, 4, 2, 4>(
+    device const uint32_t*      w_zz      [[buffer(0)]],
+    device const half*          x         [[buffer(1)]],
+    device const half*          scales_zz [[buffer(2)]],
+    device const half*          biases_zz [[buffer(3)]],
+    device atomic<float>*       out       [[buffer(4)]],
+    constant const int&         K         [[buffer(5)]],
+    uint3  tid        [[threadgroup_position_in_grid]],
+    uint   simd_gid   [[simdgroup_index_in_threadgroup]],
+    uint   simd_lid   [[thread_index_in_simdgroup]]);                                      
+                                                                                                            
+template [[host_name("zigzag_qmv_dense_half_gs_64_b_4_nsg_8_tg_2")]]                                       
+[[kernel]] void zigzag_qmv_dense_impl<half, 64, 4, 8, 2>(
     device const uint32_t*      w_zz      [[buffer(0)]],
     device const half*          x         [[buffer(1)]],
     device const half*          scales_zz [[buffer(2)]],
