@@ -504,7 +504,7 @@ by `is_equivalent`.
 the input tensors.** Trailing underscore is the MLX (and Google C++)
 convention for member fields.
 
-For SpQt: `group_size_`, `bits_` — possibly tuning knobs (`M_TILE_`,
+For SpQt: `group_size_`, `bits_` — possibly tuning knobs (`TGs_per_band_`,
 `n_simdgroups_`) if we expose them.
 
 ### Header / implementation split
@@ -759,7 +759,7 @@ Same 8 steps, simpler in places because of MVP scope:
 | 5. Kernel name | `axpby_{contig\|general}_{dtype}` | one fixed name, e.g. `spqt_zigzag_qmv_sparse_half_gs64_b4` |
 | 6. Pipeline bind | identical | identical |
 | 7. Buffer binding | 5-9 calls | ~7 calls (5 arrays + `idx_count` + maybe N) |
-| 8. Threadgroup geometry | linear over N | 2D over (M_TILE row tiles × K-index slices) |
+| 8. Threadgroup geometry | linear over N | 2D over (`group_size` row bands × K-index slices) |
 
 Total length: ~80 lines vs. axpby's ~85.
 
@@ -930,7 +930,7 @@ fewer kernels (single fixed configuration for the MVP).
 #include "mlx/backend/metal/kernels/utils.h"
 #include "mlx/backend/metal/kernels/quantized.h"   // for qdot, load_vector (Working Principle #4)
 
-template <typename T, int group_size, int bits, int M_TILE>
+template <typename T, int group_size, int bits>
 [[kernel]] void zigzag_qmv_sparse_impl(
     device const uint32_t* w_zz       [[buffer(0)]],
     device const T*        scales_zz  [[buffer(1)]],

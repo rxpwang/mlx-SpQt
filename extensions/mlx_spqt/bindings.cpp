@@ -8,6 +8,7 @@
 #include "smoke_qdot/smoke_qdot.h"
 #include "smoke_atomic/smoke_atomic.h"
 #include "smoke_threadgroup/smoke_threadgroup.h"
+#include "zigzag_qmv_dense/zigzag_qmv_dense.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -110,4 +111,29 @@ NB_MODULE(_spqt_ext, m) {
             array: output with first element updated by multiple threads, shape (N, ).
       )");
 
+  m.def(
+        "zigzag_qmv_dense",
+        &spqt_ext::zigzag_qmv_dense,
+        "x"_a,
+        "w_zz"_a,
+        "scales"_a,
+        "biases"_a,
+        "group_size"_a = 64,
+        "bits"_a = 4,
+        nb::kw_only(),
+        "stream"_a = nb::none(),
+        R"(
+            Perform a zigzag-ordered quantized matrix-vector multiplication with a dense matrix.
+    
+            Args:
+                x (array): activations, shape (B, K), dtype fp16.
+                w_zz (array): zigzag-packed weights, shape (M/gs, K/gs, gs*bits/32), dtype uint32.
+                scales (array): zigzag scales, shape (M/gs, K), dtype fp16.
+                biases (array): zigzag biases, shape (M/gs, K), dtype fp16.
+                group_size (int): size of zigzag groups (gs).
+                bits (int): number of bits per quantized weight.
+    
+            Returns:
+                array: result of the matrix-vector multiplication as float32, shape (B, M).
+        )");
 }

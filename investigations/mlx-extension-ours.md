@@ -295,10 +295,109 @@ exactly the value of doing them as separate, focused exercises.
 
 ---
 
-## Phase 3 — SpQt dense GEMV kernel (M1) ☐
+## Phase 3 — SpQt dense GEMV kernel (M1) ☐ (in progress)
 
-*To be filled in during M1.* Adds `zigzag_quantize` (Python helper) plus the
-dense zigzag-GEMV Metal kernel. The kernel-design milestone.
+The kernel-design milestone. Adds `zigzag_quantize` (Python helper) plus the
+dense zigzag-GEMV Metal kernel. M2 then increments this with idx-driven
+sparsity.
+
+### M1 deliverables (per `MILESTONES.md`)
+
+1. `zigzag_quantize(w_fp, group_size, bits) → (w_zz, scales_zz, biases_zz)` —
+   pure Python/MLX helper. Takes the *original* full-precision weight matrix
+   and returns zigzag-quantized output (rearrange-then-quantize, matching the
+   llama.cpp-SpQt reference's pattern).
+2. **Dense** zigzag-GEMV Metal kernel — full multi-TG K-tiled architecture
+   with cross-TG atomic-reduce. Walks all K-positions contiguously (no
+   sparsity yet; that lands in M2).
+3. Correctness gate: `(y - y_ref).abs().max() < 1e-3` vs.
+   `mx.quantized_matmul` on equivalent (non-zigzag) packed weights, single
+   shape, dense activations.
+
+### Why M1 needs design before code
+
+Three layout decisions interlock — getting any of them wrong means redoing
+work:
+
+- **`zigzag_quantize` and the kernel must agree on the exact memory layout**
+  of `w_zz` / `scales_zz` / `biases_zz`. Subtle disagreement = silent buffer-
+  binding corruption.
+- **Whether `qdot` / `load_vector` reuse fits** depends on the layout's
+  consumption pattern. Working Principle #4 wants reuse, but the SpQt
+  reference's "one activation × many row-partials" inversion may not match
+  qmv_fast's "many activations × few row-partials" pattern.
+- **Threadgroup geometry** (rows-per-TG = `group_size`, simdgroups per TG,
+  K-stride per simdgroup) determines memory access patterns and
+  atomic-contention cost. Has to be picked once and consistent across kernel
+  + dispatch.
+
+We design before code so these decisions are explicit and reviewed.
+
+### Step plan
+
+| Step | Output | Owner | Status |
+|---|---|---|---|
+| 3.1 | `investigations/mlx-spqt-reference.md` — what zigzag concretely means in llama.cpp-SpQt's reference (fp-space rearrangement + dense kernel walk) | Claude (investigation) | ✅ |
+| 3.2 | `investigations/mlx-qmv-fast.md` — line-by-line deep-dive of `qmv_fast_impl` to identify what we mirror vs. flip | Claude (investigation) | ☐ |
+| 3.3 | `investigations/M1-zigzag-layout.md` — design spec combining 3.1 and 3.2: layout choice, kernel architecture, qdot-reuse decision, threadgroup geometry | Claude (investigation) | ☐ |
+| 3.4 | `extensions/mlx_spqt/mlx_spqt/zigzag_quantize.py` (or in `__init__.py`) — Python/MLX implementation; tested in isolation via dequantize round-trip | User (with line-level instruction) | ☐ |
+| 3.5 | `extensions/mlx_spqt/zigzag_qmv_dense/` extension — `.h` + `.cpp` + `.metal` + binding + CMakeLists wiring; mirrors the M0b add-a-kernel workflow | User | ☐ |
+| 3.6 | `extensions/mlx_spqt/test_zigzag_qmv_dense.py` — correctness check against `mx.quantized_matmul` on equivalent (non-zigzag) weights | User | ☐ |
+
+### Why this order
+
+- **3.1 first** anchors what zigzag concretely is (target pattern). Sets the
+  vocabulary: super-block-per-input-column, fp-rearrange-then-quantize, etc.
+- **3.2 next** anchors the structural template (`qmv_fast_impl`'s patterns).
+  Now we can talk about the M1 kernel as "qmv_fast with these specific
+  changes" rather than abstractly.
+- **3.3 commits to a design.** Concrete layout, geometry, and qdot decision.
+  After this, 3.4-3.6 are bounded effort with no design risk.
+- **3.4 before 3.5** — Python is faster to iterate on, easier to verify in
+  isolation (dequantize round-trip, compare to original up to quant error).
+  Locks in the layout `zigzag_quantize` produces *before* the kernel has to
+  consume it.
+- **3.5 before 3.6** — kernel scaffold + body + eval_gpu before the
+  correctness test. Mirrors M0b workflow.
+
+### Risks specific to M1
+
+| Risk | Mitigation |
+|---|---|
+| `qdot`'s consumption pattern doesn't fit the zigzag layout | Resolved in 3.3 with the explicit qdot-reuse decision. Fallback: write a custom inner loop without qdot (lose Working Principle #4 partial credit; still correct). |
+| Threadgroup geometry choice is suboptimal for performance | M1 only requires correctness, not performance. Geometry is a tuning knob revisited in M3. |
+| `zigzag_quantize`'s output layout subtly disagrees with the kernel's expectation | Test 3.4 in isolation (round-trip via `mx.dequantize`) to lock the layout before kernel work begins. |
+| Cross-TG atomic-add accumulator needs explicit zero-fill | M0b smoke #3 confirmed `atomic_fetch_add_explicit` works at scale. Zero-fill is an `eval_gpu`-side detail (either explicit kernel or trust `mx::allocator::malloc` zeroing — to be confirmed in 3.5). |
+
+### Success criteria for M1 (= done criterion)
+
+```python
+# w is the original fp16 weight matrix (single shape: M=4096, K=4096)
+w_zz, scales_zz, biases_zz = mlx_spqt.zigzag_quantize(w, group_size=64, bits=4)
+y_zz = mlx_spqt.dense_zigzag_qmv(x, w_zz, scales_zz, biases_zz)
+
+# reference: standard (non-zigzag) quantization of the same weights
+w_q, scales, biases = mx.quantize(w, group_size=64, bits=4)
+y_ref = mx.quantized_matmul(x, w_q, scales, biases, transpose=True,
+                             group_size=64, bits=4)
+
+assert (y_zz - y_ref).abs().max().item() < 1e-3
+```
+
+Both sides quantize the same `w`; both compute `x @ dequant(w).T` modulo
+quantization error. The only difference between sides is the layout and the
+kernel — if they match within MLX's standard tolerance, M1's contract holds.
+
+### What M1 does NOT need to deliver
+
+- **No sparsity.** Idx-driven K-walk lands in M2.
+- **No performance tuning.** Threadgroup geometry can be picked for ease of
+  implementation, not perf. M3 revisits.
+- **No multi-shape support.** Single fixed shape (M=4096, K=4096, fp16,
+  gs=64, b=4) per Scope decision #3.
+- **No CPU implementation.** GPU-only forward, throw NYI on CPU.
+- **No autograd.** Throws NYI on jvp/vjp/vmap (matches `QuantizedMatmul` in
+  MLX core).
 
 ---
 
@@ -319,29 +418,115 @@ dense zigzag-GEMV Metal kernel. The kernel-design milestone.
 
 If `mlx_spqt` ever gets promoted into MLX core (e.g. as
 `mx.quantized_matmul(..., mode="affine_zigzag")`), the migration is
-well-scoped — most of our structural choices (Working Principle #4 mirroring
+well-scoped. Most of our structural choices (Working Principle #4 mirroring
 `qmv_fast_impl`, the `Primitive` shape matching `QuantizedMatmul`, the
 `eval_gpu` pattern) make this a lift-and-shift rather than a rewrite.
 
-**Rough effort estimate:** ~8-15 hours of focused work.
+**Effort estimate:** ~11-19 hours of focused work
+(*revised from earlier ~8-15h estimate after Phase 3.1 SpQt-reference investigation*).
 
-### Component-by-component migration map
+### What's been clarified through M1 investigation
 
-| Extension piece | Core counterpart | Difficulty |
-|---|---|---|
-| Metal kernel template | Insert into `mlx/backend/metal/kernels/quantized.{h,metal}` cascade | Low — already mirrors `qmv_fast_impl` patterns |
-| `eval_gpu` wrapper | New function in `mlx/backend/metal/quantized.cpp`, called from a dispatcher | Low — mirrors existing `qmv(...)` line-for-line |
-| `Primitive` subclass | Add `QuantizationMode::AffineZigzag` enum; extend `QuantizedMatmul`'s mode dispatch | Medium — touches `primitives.{h,cpp}` + `ops.cpp` |
-| Python op | Extend `mx.quantized_matmul(..., mode="affine_zigzag", idx=...)` with optional `idx` plumbing | Medium — API + plumbing through `ops.{h,cpp}` and `python/src/ops.cpp` |
-| `zigzag_quantize` (Python) | Port to C++ behind `mx.quantize(mode="affine_zigzag")` for consistency with the other quant modes | Medium — the largest single port |
-| Tests | Slot into `python/tests/test_quantized.py` following the `test_qmv` pattern | Trivial |
-| `bindings.cpp`, `CMakeLists.txt`, `setup.py`, `pyproject.toml`, `current_binary_dir()` | Deleted; MLX's existing machinery covers them | Trivial |
+Two findings that meaningfully shifted the picture:
 
-### Two API design questions to settle
+1. **Zigzag is fp-space rearrangement + standard quantize, not a packed-bytes operation.**
+   Per `mlx-spqt-reference.md`, `rearrange_tensor_zigzag` is a 12-line fp
+   reshuffle that runs *before* the unchanged Q4_K quantizer. For upstream:
+   `mx.quantize(mode="affine_zigzag")` becomes "reshape input → call
+   existing `affine_quantize`" — much simpler than I'd estimated. **~1-2h
+   instead of ~2-4h.**
 
-1. **How to expose `idx`** in the public API:
-   - Option α: optional `idx` kwarg on `mx.quantized_matmul` (idiomatic; subtle API surface change).
-   - Option β: separate `mx.zigzag_quantized_matmul(...)` op (uglier but no public-API risk).
+2. **The dense kernel is a structural inversion of qmv_fast, not a
+   parameter tweak.** It's "one activation × many row-partials per thread"
+   (vs. qmv_fast's "many activations × few row-partials"). It's a *new*
+   kernel template alongside `qmv_fast_impl`, but it slots cleanly into the
+   existing template-cascade and macro infrastructure.
+
+### Component-by-component migration map (updated)
+
+| Extension piece | Core counterpart | Difficulty | Hours |
+|---|---|---|---|
+| `zigzag_quantize` (Python) | Port to C++ behind `mx.quantize(mode="affine_zigzag")`. Reshape + existing `affine_quantize` machinery — *not* a separate algorithm | **Low** (was Medium) | 1-2 |
+| Mode-dispatch wiring | Add `QuantizationMode::AffineZigzag` enum; touch `string_to_quantization_mode`, `quantization_mode_to_string`, `quantized_matmul` op function, `qmv` dispatcher | Medium | 2-3 |
+| Metal kernel template + macro instantiation | Insert new template alongside `qmv_fast_impl` in `mlx/backend/metal/kernels/quantized.h`; add to `quantized.metal` cascade | Low — mirrors qmv_fast template structure | 2-3 |
+| `eval_gpu` wrapper / dispatcher | New function in `mlx/backend/metal/quantized.cpp` for the zigzag kernel | Low/Medium — cross-TG accumulator complicates dispatcher (see new risk below) | 2-3 |
+| **Cross-TG atomic accumulator infrastructure** (new) | Pre-zeroed scratch buffers + "last-TG-arrives" pattern. MLX's existing dispatchers don't have this convention; needs new infrastructure (or alternative reduction strategy). | **New / Medium** | 2-4 |
+| **`atomic_float` vs. int-scaling fallback** (new, conditional) | We use `atomic_float` directly (M0b smoke #3 verified). Reference uses int-scaling for portability across older Apple GPUs. Maintainers may want both paths. | **New / conditional** | +1-2 |
+| Tests | Slot into `python/tests/test_quantized.py` following the `test_qmv` pattern | Trivial | 0.5-1 |
+| `bindings.cpp`, `CMakeLists.txt`, `setup.py`, `pyproject.toml`, `current_binary_dir()` | Deleted; MLX's existing machinery covers them | Trivial | 0 |
+| **Total** | | | **11-19 hours** |
+
+### Newly identified risks (not visible in earlier Phase 6)
+
+#### 1. Cross-TG atomic accumulator infrastructure
+
+The SpQt reference allocates `atomic_array` and `atomic_counter` as device-side
+scratch buffers, expects them **pre-zeroed before each call**, and uses a
+"last-TG-arrives" pattern to write the final result. MLX core's existing
+quantized dispatchers (`qmv`, `qmm`, etc.) **don't have this pattern** — they
+go single-pass with no cross-TG reduction.
+
+For upstream, two paths:
+
+- **(a) Establish a "scratch-buffer-with-zero-fill" convention in
+  `quantized.cpp`.** The dispatcher allocates the atomic buffers, zero-fills
+  them (separate pre-kernel or trust allocator-zeroing), then dispatches the
+  main kernel. *New infrastructure for MLX's quantized path.*
+- **(b) Use a different reduction strategy** — e.g., 2-pass: per-TG outputs
+  to an intermediate buffer, then a separate reduction kernel. Cleaner
+  architecturally but adds a kernel and an allocation.
+
+Either path adds 2-4h of infrastructure work beyond a "drop-in kernel" port.
+Worth surfacing during code review with MLX maintainers — they may have an
+opinion on which pattern fits their architectural conventions.
+
+#### 2. `atomic_float` vs. int-scaling tradeoff
+
+We use `atomic_fetch_add_explicit` on `device atomic_float*` directly
+(verified to scale via M0b smoke #3 — 256 TGs × 32 threads, lossless on
+M-series). The SpQt reference uses an int-scaling workaround
+(`SCALE_FACTOR = 1e5`, lossy ~5 decimal digits) because **`atomic_float` is
+software-emulated on some older Apple GPUs**.
+
+For upstream:
+- MLX core supports a wide hardware range. Maintainers may want **both
+  paths** for portability: `atomic_float` on hardware that supports it
+  natively, int-scaling fallback elsewhere.
+- That's a runtime-or-build-time toggle plus the int-scaling workaround
+  code. Conditional cost: +1-2h. Skippable if maintainers accept atomic_float
+  as the only path.
+
+### M1 design decisions that affect upstream cost
+
+These choices, made now in M1's design doc (Step 3.3), have downstream
+implications for upstream-migration cost:
+
+1. **Use `atomic_float` directly, or hedge with int-scaling fallback now?**
+   - Going atomic_float-only: simpler M1, faster perf in our test
+     environment, may need rework for upstream merge.
+   - Hedging with int-scaling toggle now: more code in M1, but
+     upstream-ready out of the box.
+   - **M1 recommendation**: **atomic_float-only for M1/M2/M3** (simpler,
+     faster, valid on our test hardware). If we ever upstream, add the
+     int-scaling fallback at that point.
+
+2. **How to handle cross-TG accumulator zero-fill?**
+   - Trust `mx::allocator::malloc` to return zeroed memory: cleaner code,
+     depends on MLX implementation details we observed empirically.
+   - Explicit zero-fill in `eval_gpu`: more robust, ports cleanly to upstream
+     where MLX's behavior may differ.
+   - **M1 recommendation**: **explicit zero-fill** (small extra kernel or
+     `MTLBlitCommandEncoder memset`). Saves rework for upstream.
+
+### Unchanged from earlier Phase 6
+
+#### Two API design questions still deferred to upstream merge time
+
+1. **How to expose `idx`** in the public API (M2-relevant):
+   - Option α: optional `idx` kwarg on `mx.quantized_matmul` (idiomatic;
+     subtle API surface change).
+   - Option β: separate `mx.zigzag_quantized_matmul(...)` op (uglier but no
+     public-API risk).
 
 2. **Where dense-zigzag vs. sparse-zigzag dispatch lives:** single
    `mode="affine_zigzag"` with optional `idx`, or two modes
@@ -350,13 +535,39 @@ well-scoped — most of our structural choices (Working Principle #4 mirroring
 Both questions are deferred. They wouldn't change the kernel work, only the
 public-facing wrapper.
 
+#### Structural choices that keep upstream-cost low
+
+- **Working Principle #4 (mirror qmv_fast)** — our kernel slots into the
+  existing template/macro/dispatch tree without restructuring.
+- **MLX-affine over Q4_K** — flat per-group scales (no super-block
+  hierarchy) means no Q4_K-specific decoding logic to port. We avoid most of
+  llama.cpp-SpQt's complexity.
+- **The fp-rearrange-then-quantize separation** — keeps `zigzag_quantize`
+  independent of the kernel; can be implemented and tested in isolation,
+  both as extension and as core.
+
+### Overall verdict
+
+**Migration risk is moderate and well-bounded.** Estimate ≈ 11-19 hours,
+similar magnitude to Phase 6's earlier 8-15h estimate but with a modestly
+shifted distribution (easier on Python-port side, slightly harder on
+kernel-infrastructure side). The structural choices we've already locked in
+(Working Principle #4, MLX-affine target, extension-first development) keep
+cost low. The newly identified risks (cross-TG accumulator infra,
+atomic_float portability) are real but each is bounded to a few hours of
+well-defined work.
+
+**No blockers for upstream merge become visible from this analysis.** The
+path stays clear.
+
 ### Talk-friendly framing
 
 > Built as a registered MLX extension for the MVP. Upstream migration is
-> well-scoped (~8-15 hours, mostly mode-dispatch wiring); the kernel itself
-> slots into MLX's existing template structure unchanged. The
-> extension/core boundary was chosen deliberately so the MVP shipped quickly
-> and the upstream path isn't a rewrite.
+> well-scoped (~11-19 hours, mostly kernel + mode-dispatch wiring); the
+> kernel itself slots into MLX's existing template structure with two new
+> infrastructure pieces (cross-TG accumulator pattern; atomic_float
+> portability fallback). The extension/core boundary was chosen deliberately
+> so the MVP shipped quickly and the upstream path isn't a rewrite.
 
 Maps cleanly onto the rubric's "minimal effort to MVP, clean path to
 production" framing.

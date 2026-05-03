@@ -2,8 +2,26 @@
 
 import mlx.core as mx
 
-from ._spqt_ext import axpby
-from ._spqt_ext import smoke_uint32
-from ._spqt_ext import smoke_qdot
-from ._spqt_ext import smoke_atomic
-from ._spqt_ext import smoke_threadgroup
+from ._spqt_ext import (
+    axpby,
+    smoke_uint32,
+    smoke_qdot,
+    smoke_atomic,
+    smoke_threadgroup,
+    zigzag_qmv_dense,
+)
+
+from .quantization import quantize_zigzag, dequantize_zigzag
+
+__all__ = [
+    "axpby",
+    # smoke kernels
+    "smoke_uint32",
+    "smoke_qdot",
+    "smoke_atomic",
+    "smoke_threadgroup",
+    "zigzag_qmv_dense",
+    # quantization helpers
+    "quantize_zigzag",
+    "dequantize_zigzag",
+]

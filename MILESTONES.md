@@ -197,31 +197,36 @@ Splitting this way isolates *layout correctness* (M1) from *sparsity correctness
    This is what a future `mx.quantize(mode="affine_zigzag")` would look like.
 
 2. **Dense zigzag-GEMV Metal kernel** (full kernel; the architectural payload).
-   - Templated `<typename T, int group_size, int bits, int M_TILE>` from day one.
-   - Multi-TG K-tiled architecture with cross-TG atomic-reduce on `out` —
-     even though dense doesn't strictly *need* K-tiling, building it here so M2's
-     incremental change is just the K-walk. Mirrors llama.cpp-SpQt's
-     `kernel_mul_mv_q4_K_f32_zigzag_multi_threadgroup_impl` (dense) at
-     `ggml-metal.metal:5702`.
+   - Templated `<typename T, int group_size, int bits, int num_simdgroups, int TGs_per_band>` from day one. Extends `qmv_fast_impl`'s `<T, gs, bits>` with two M3-tunable knobs.
+   - Multi-TG K-tiled architecture with cross-TG atomic-reduce on `out` plus
+     within-TG cross-simdgroup reduce via threadgroup memory + barrier.
+     Mirrors llama.cpp-SpQt's `kernel_mul_mv_q4_K_f32_zigzag_multi_threadgroup_impl`
+     (dense) at `ggml-metal.metal:5702`.
    - Walks contiguous K positions in the zigzag layout (no idx).
    - Reuses MLX kernel helpers per Working Principle #4.
 
-**Design: mirror `qmv_fast_impl` structure** (per Working Principle #4).
-Templated `<typename T, int group_size, int bits, int M_TILE>` from day one;
-MVP instantiates one specialization (`<half, 64, 4, 64>`); future bit-widths and
-group sizes are added by one `template [[host_name(...)]]` line each.
+**Design: SpQt-reference threadgroup pattern with qmv_fast structural reuse.**
+4 simdgroups × 32 lanes = 128 threads/TG; each lane owns `rows_per_lane =
+group_size / SIMD_SIZE` = 2 rows of the band; all SGs cover all 64 rows of the
+band, splitting K. Within-TG reduce sums per-row partials across the 4 SGs.
+Cross-TG atomic merges TG-level partials. MVP instantiates one specialization
+(`<half, 64, 4, 4, 4>`); future tuning adds `(num_simdgroups, TGs_per_band)`
+combinations from the same template body. Note: in zigzag, the row-band size
+**equals `group_size` by construction** — same as llama.cpp-SpQt where
+`superblock_size = QK_K = 256` plays both roles in Q4_K. No separate `M_TILE`
+parameter.
 
 | | Reuse from `qmv_fast_impl` | Diverge for SpQt |
 |---|---|---|
-| Template signature | `<T, group_size, bits>` verbatim | + `int M_TILE` for our row-tile |
+| Template signature | `<T, group_size, bits>` | + `int num_simdgroups, int TGs_per_band` for M3 tuning |
 | Constexpr derivations | `pack_factor`, `bytes_per_pack`, `values_per_thread`, `block_size`, `scale_step_per_thread` — all verbatim | — |
-| Activation load | `load_vector<T, U, values_per_thread, bits>` | — |
-| Inner dequant + FMA | `qdot<U, values_per_thread, bits>(wl, x_thread, s, b, sum)` | — |
-| Accumulator type | `typedef float U; thread U result[...] = {0};` | — |
-| Cross-lane reduce | `simd_sum(result[row])` | — |
-| Outer K-walk | `for (int k = 0; k < in_vec_size; k += block_size)` | **Replace** in M1 with zigzag-aware contiguous walk; **further replace** in M2 with idx-driven walk |
-| Output write | Direct `y[row] = result[row]` from lane 0 | **Replace** with `atomic_fetch_add_explicit(&y[row], ...)` for cross-TG reduce |
-| Threadgroup geometry | `(SIMD_SIZE, 2, 1)` — 8 rows / TG, all rows on one TG | **Replace** — K-tiled across TGs; each TG owns `M_TILE` rows × a slice of K |
+| Activation load | scalar `x[k]` per K-position is sufficient for M1 dense; `load_vector` may return for M2 idx batching | — |
+| Accumulator type | `typedef float U; thread U result[rows_per_lane] = {0};` | — |
+| Inner dequant + FMA | `qdot<U, values_per_thread, bits>(wl, x_thread, s, b, sum)` | **Replace** with custom dequant+FMA loop (see `mlx-qmv-fast.md` §8 for why qdot doesn't fit) |
+| Cross-lane reduce | `simd_sum(result[row])` | **Skip** — each lane owns disjoint rows of its SG's accumulator set |
+| Outer K-walk | `for (int k = 0; k < in_vec_size; k += block_size)` | **Adapt** — SG walks its `[k_start, k_end)` stripe; **further replace** in M2 with idx-driven walk |
+| Output write | Direct `y[row] = result[row]` from lane 0 | **Replace** with two-level reduce: TG-mem + barrier across SGs, then `atomic_fetch_add_explicit` cross-TG |
+| Threadgroup geometry | `(SIMD_SIZE, 2, 1)` — 8 rows / TG, all rows on one TG | **Replace** — `(SIMD_SIZE × num_simdgroups, 1, 1)` = 128 threads/TG; SGs share rows, split K; multiple TGs per band |
 
 The "Reuse" rows are M1/M2's non-divergence policy. Header includibility for
 `qdot` et al. is gated by M0b smoke test (d).
@@ -264,7 +269,7 @@ of M1's reference (`_multi_threadgroup_impl`).
 |---|---|---|
 | Inputs | `(x, w_zz, scales_zz, biases_zz)` | + `idx` (`int32` mx.array), `idx_count` (int constant) |
 | K-walk | `for (kk = 0; kk < num_k_blocks; kk++) ...` (contiguous) | `for (i = 0; i < idx_count; i += block_size_k) { k = idx[i + ...]; ... }` (idx-driven) |
-| Threadgroup geometry | TG owns `M_TILE` rows × contiguous K-slice | TG owns `M_TILE` rows × `idx` slice |
+| Threadgroup geometry | TG owns `group_size` rows × contiguous K-slice | TG owns `group_size` rows × `idx` slice |
 | Output write | `atomic_fetch_add_explicit(&y[row], ...)` | unchanged |
 | Buffer binding (`eval_gpu`) | 4 input arrays | + `idx` array binding + `idx_count` via `set_bytes` |
 

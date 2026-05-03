@@ -32,7 +32,7 @@ find_package(MLX CONFIG REQUIRED)
 add_library(mlx_spqt)
 
 # Add sources
-target_sources(mlx_spqt PUBLIC ${CMAKE_CURRENT_LIST_DIR}/axpby/axpby.cpp ${CMAKE_CURRENT_LIST_DIR}/smoke_uint32/smoke_uint32.cpp ${CMAKE_CURRENT_LIST_DIR}/smoke_qdot/smoke_qdot.cpp ${CMAKE_CURRENT_LIST_DIR}/smoke_atomic/smoke_atomic.cpp ${CMAKE_CURRENT_LIST_DIR}/smoke_threadgroup/smoke_threadgroup.cpp)
+target_sources(mlx_spqt PUBLIC ${CMAKE_CURRENT_LIST_DIR}/axpby/axpby.cpp ${CMAKE_CURRENT_LIST_DIR}/smoke_uint32/smoke_uint32.cpp ${CMAKE_CURRENT_LIST_DIR}/smoke_qdot/smoke_qdot.cpp ${CMAKE_CURRENT_LIST_DIR}/smoke_atomic/smoke_atomic.cpp ${CMAKE_CURRENT_LIST_DIR}/smoke_threadgroup/smoke_threadgroup.cpp ${CMAKE_CURRENT_LIST_DIR}/zigzag_qmv_dense/zigzag_qmv_dense.cpp)
 
 # Add include headers
 target_include_directories(mlx_spqt PUBLIC ${CMAKE_CURRENT_LIST_DIR})
@@ -55,6 +55,7 @@ if(MLX_BUILD_METAL)
     ${CMAKE_CURRENT_LIST_DIR}/smoke_qdot/smoke_qdot.metal
     ${CMAKE_CURRENT_LIST_DIR}/smoke_atomic/smoke_atomic.metal
     ${CMAKE_CURRENT_LIST_DIR}/smoke_threadgroup/smoke_threadgroup.metal
+    ${CMAKE_CURRENT_LIST_DIR}/zigzag_qmv_dense/zigzag_qmv_dense.metal
     INCLUDE_DIRS
     ${PROJECT_SOURCE_DIR}
     ${MLX_INCLUDE_DIRS}
