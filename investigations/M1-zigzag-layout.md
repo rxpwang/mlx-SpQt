@@ -37,7 +37,7 @@ dequantize-then-fp-matmul reference.
 | Threadgroup pattern | SpQt-reference-style: multiple SGs per TG split K-walk; within-TG reduce sums per-row partials across SGs | Higher per-TG occupancy (4 SG vs. 2 in qmv_fast-style), lower atomic contention (4 TGs/band vs. 8), better data locality per SG. Reuses M0b smoke #4's threadgroup-reduce pattern. |
 | Threadgroup geometry | 4 SG × 32 lanes = 128 threads/TG; `rows_per_lane` = `group_size / SIMD_SIZE` = 2; 4 TGs per band | Mirrors llama.cpp-SpQt's per-TG SG count. `num_simdgroups` and `TGs_per_band` are M3-tunable knobs. |
 | `qdot` reuse | **No** — write custom inner loop | Per `mlx-qmv-fast.md` §8: qdot's "16 weights → 1 accumulator" can't service multiple row-partials per K-position |
-| Within-TG reduction | `threadgroup atomic<float>` + `atomic_fetch_add_explicit` (Option I); barrier between init/accumulate/read phases | Native MSL atomic on Apple GPU family 7+ (M1+); MLX core's `atomic.h` treats `atomic<float>` as first-class. Cleaner than per-SG disjoint regions + manual sum. |
+| Within-TG reduction | `threadgroup atomic<int>` + `SCALE_FACTOR = 2^16` (Option I'); each lane scales partials, atomic_fetch_add as int into shared TG-mem; barrier; first 64 threads atomic_load + unscale + atomic_fetch_add to global y | MSL doesn't support `threadgroup atomic<float>` (float atomics are device-only); int+SCALE_FACTOR is the canonical workaround per llama.cpp-SpQt (`ggml-metal.metal:5680`). 2^16 gives ~1.5e-5 absolute precision per scaled add with ~1000× int32 overflow margin. Cuts cross-TG atomic-float contention 32× (128 → 4 per row). |
 | Cross-TG reduction | `atomic_fetch_add_explicit` on `device atomic<float>* y` | M0b smoke #3 verified scales lossless to 256 TGs × 32 threads |
 | Output zero-fill | Explicit zero-fill in `eval_gpu` before main dispatch | More robust than relying on `mx::allocator::malloc` zeroing (per Phase 6 recommendation) |
 
@@ -625,12 +625,27 @@ allow-list excludes `threadgroup float*` for atomic ops; only `int`/`uint`/
 llama.cpp-SpQt uses `threadgroup atomic_int` with a `SCALE_FACTOR` for its
 within-TG reduce: it's the only float-equivalent that compiles.)
 
-**As built**: **No within-TG reduce at all.** Each lane atomic-adds its
-per-row partials directly to `device atomic<float>* y`. With 8 lanes per
-row chunk × 4 SGs × 4 TGs = 128 atomic-adds per output row per kernel
-launch. Higher cross-TG atomic contention than the planned design, but
-correct, and substantially simpler (no threadgroup memory, no barriers, no
-scaling tricks).
+**Initially built (M1 first commit)**: **No within-TG reduce at all.** Each
+lane atomic-added its per-row partials directly to `device atomic<float>*
+y`. 128 atomic-adds per output row per kernel launch. Correct but
+contention-heavy.
+
+**Currently built (this commit)**: **Option I'** — `threadgroup atomic<int>
+shared_out[group_size]` with `SCALE_FACTOR = 2^16` (matches
+llama.cpp-SpQt's `ggml-metal.metal:5680`). Each lane within a TG scales its
+register-resident partials and `atomic_fetch_add`s them into the
+threadgroup-mem int slots. After a barrier, the first 64 threads in the TG
+atomic_load each slot, unscale, and atomic_fetch_add the float result to
+global `out`.
+
+Cross-TG atomic-float contention drops from 128 → **4** per row (one per
+TG × 4 TGs/band). Threadgroup int atomics are cheap (TG memory, no L1/L2
+round-trip). SCALE_FACTOR = 2^16 gives ~1.5e-5 absolute precision per
+scaled add and ~1000× int32 overflow margin for our shape.
+
+Test still passes: `max abs err = 3.97e-4` (slight increase from 9.2e-5 in
+the no-reduce baseline due to SCALE_FACTOR rounding, but well under the
+1e-3 threshold).
 
 ### Pivot 2 — per-thread work assignment
 
@@ -664,20 +679,20 @@ from 4 uint16 reads (the lane's 16 rows at that K-position).
 
 The current kernel is a **working draft** — correct but not optimized:
 
-- **Within-TG reduce**: would cut atomic contention 8× (lanes within an SG
-  contributing to the same row-chunk could pre-sum via threadgroup memory
-  before the cross-TG atomic). Not strictly needed for correctness; the
-  llama.cpp-SpQt int+scaling pattern would work, or Option II's per-SG
-  disjoint-region pattern.
-- **Within-SG `simd_sum` reduce**: in our current geometry, 4 lanes per
-  K-pos compute partials for 4 distinct row chunks (no within-SG redundancy).
-  But across SGs, lanes 0/4/8/12/... all hit the same row chunk — that's
-  where cross-SG reduction would help.
-- **Optimal `(num_simdgroups, TGs_per_band)`**: M3 perf-tuning territory.
+- **Within-SG `simd_sum` reduce**: across SGs, lanes 0/4/8/12/... all
+  contribute partials for the same row chunk via separate atomic_int adds.
+  A `simd_sum`-style cross-lane reduce within each SG would coalesce these
+  before the threadgroup atomic, reducing TG-atomic ops from 32 per slot
+  per TG to 4 per slot per TG. Modest speedup expected; needs SG-internal
+  geometry change.
+- **Optimal `(num_simdgroups, threadgroups_per_band)`**: currently `(4, 4)`.
+  Reducing TGs/band cuts cross-TG atomic ops further; (4, 2) gives 2 atoms
+  per row at the cost of half the M-axis parallelism. M3 perf-tuning
+  territory.
 - **`load_vector`-style activation amortization**: not used; could load a
   K-block of activations once and reuse across multiple K-positions.
-- **Multi-batch (B>1)**: kernel signature doesn't include batch stride; would
-  need `out_vec_size`-equivalent and a batch dim in the grid.
+- **Multi-batch (B>1)**: kernel signature doesn't include batch stride;
+  would need `out_vec_size`-equivalent and a batch dim in the grid.
 
 ### Done criterion verification
 
@@ -690,15 +705,25 @@ precision loss, not kernel error).
 
 ## 12. Implementation experience — lessons captured
 
-Six lessons worth carrying forward, including the false starts:
+Seven lessons worth carrying forward, including the false starts:
 
-### A. `threadgroup atomic<float>` is a Metal hard constraint
+### A. `threadgroup atomic<float>` is a Metal hard constraint — but `atomic<int>` + SCALE_FACTOR works
 
-Float atomics in MSL are device-address-space only. Apple GPU family 7+
-gates float atomic *fetch_add* even for device space; threadgroup space is
-restricted to integer atomic types. **Always check `nm -g` against
-`libmlx.dylib` for symbol exports** before assuming an MLX backend helper
-is callable from extensions:
+Float atomics in MSL are device-address-space only; threadgroup space is
+restricted to integer atomic types (`atomic_int`, `atomic_uint`,
+`atomic_long`, `atomic_ulong`). When you need within-TG float-style
+accumulation, the canonical workaround is **`threadgroup atomic<int>` +
+`SCALE_FACTOR`**: scale each float by `SCALE_FACTOR` (e.g. `2^16`), cast
+to int, atomic_fetch_add into TG memory, barrier, then atomic_load and
+divide by `SCALE_FACTOR` to recover the float for the cross-TG write.
+
+llama.cpp-SpQt uses this pattern at `ggml-metal.metal:5680`. For our shape
+(K=4096 N(0,1) accumulators), `SCALE_FACTOR = 2^16` gives ~1.5e-5
+absolute precision per scaled add and ~1000× int32 overflow margin —
+sweet spot.
+
+**Always check `nm -g` against `libmlx.dylib` for symbol exports** before
+assuming an MLX backend helper is callable from extensions:
 
 ```bash
 nm -g python/mlx/lib/libmlx.dylib | grep <symbol>
@@ -767,6 +792,30 @@ For a kernel that internally computes in fp32 from fp16 inputs, the
 reference must mirror that promotion to be a fair correctness check.
 Otherwise you're measuring the reference's precision, not the kernel's
 correctness.
+
+### G. GPU benchmarking is noisy on light kernels — match MLX's harness
+
+For lightweight (< 100 μs) kernels, naive single-mean timing varies ±30-40%
+run-to-run on Apple GPUs. Two non-obvious causes: macOS's GPU clock state
+takes more than the typical 5-warmup-iter window to stabilize on a high
+boost, and `time.perf_counter`-style timing includes Python and command-
+buffer overhead that's hard to amortize away with single calls.
+
+Three patterns help, in increasing effort:
+
+1. **Long, interleaved warmup** before any timing (~50 iters across all
+   benchmarks before the first timed call). Drops the run-1-vs-rest gap.
+2. **Chained calls inside `fn`** (`out = out + fn()` or similar) so each
+   timed iter runs N kernel dispatches. Amortizes per-iter eval/sync
+   overhead and defeats MLX's graph dedup. Match MLX's stock convention
+   from `benchmarks/python/sdpa_vector_bench.py`: `loops = 10` or 32
+   inside the timed function.
+3. **Best-of-N (min)** rather than mean. GPUs can only get as fast as
+   they can; slower runs are interference. Standard pattern in NVIDIA
+   profilers and Apple's Xcode GPU profiler.
+
+MLX's `benchmarks/python/time_utils.py:time_fn` is the canonical harness;
+combine with the chain-inside-fn pattern for stable numbers.
 
 ## Summary
 

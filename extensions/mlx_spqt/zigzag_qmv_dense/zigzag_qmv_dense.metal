@@ -47,14 +47,15 @@ template <typename T, int group_size, int bits, int num_simdgroups, int threadgr
 
     typedef float U;
 
-    // // prepare atomic shared memory for accumulation within threadgroup. each threadgroup will compute results for a band of group_size rows.
-    // threadgroup atomic<float> shared_out[group_size]; 
+    // prepare atomic shared memory for accumulation within threadgroup. each threadgroup will compute results for a band of group_size rows.
+    constexpr float SCALE_FACTOR = 65536.0f; // float to int
+    threadgroup atomic<int> shared_out[group_size]; 
 
-    // // initialize shared_out to 0.0f
-    // for (int i = thread_id; i < group_size; i += num_simdgroups * SIMD_SIZE) {
-    //     atomic_store_explicit(&shared_out[i], 0.0f, memory_order_relaxed);
-    // }
-    // threadgroup_barrier(mem_flags::mem_threadgroup); // ensure shared_out is initialized before
+    // initialize shared_out to 0.0f
+    for (int i = thread_id; i < group_size; i += num_simdgroups * SIMD_SIZE) {
+        atomic_store_explicit(&shared_out[i], 0, memory_order_relaxed);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup); // ensure shared_out is initialized before
 
     // local result accumulator in registers for each thread.
     float acc[values_per_thread] = {0.0f}; // each thread accumulates values_per_thread output elements. 
@@ -101,11 +102,23 @@ template <typename T, int group_size, int bits, int num_simdgroups, int threadgr
         biases_zz += values_per_thread * 32 / group_size;
     }
 
-
-    // all the threads write their results to global memory atomically. 
+    // write the accumulated results to shared memory atomically.
     for (int i = 0; i < values_per_thread; i++) {
-        int out_index = row_start + simd_lid * values_per_thread % group_size + i;
-        atomic_fetch_add_explicit(&out[out_index], acc[i], memory_order_relaxed);
+        int idx = simd_lid * values_per_thread % group_size + i;
+        atomic_fetch_add_explicit(&shared_out[idx], (int)(acc[i] * SCALE_FACTOR), memory_order_relaxed);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup); // ensure all threads have written their results to shared memory
+
+    // // all the threads write their results to global memory atomically. 
+    // for (int i = 0; i < values_per_thread; i++) {
+    //     int out_index = row_start + simd_lid * values_per_thread % group_size + i;
+    //     atomic_fetch_add_explicit(&out[out_index], acc[i], memory_order_relaxed);
+    // }
+
+    // write the shared memory results to global memory in parallel
+    for (int i = thread_id; i < group_size; i += num_simdgroups * SIMD_SIZE) {
+        float v = atomic_load_explicit(&shared_out[i], memory_order_relaxed) / SCALE_FACTOR; // convert back to float
+        atomic_fetch_add_explicit(&out[row_start + i], v, memory_order_relaxed); // write to global memory atomically, since different simdgroups may work on the same group of rows and cause write conflicts.
     }
 }
 
