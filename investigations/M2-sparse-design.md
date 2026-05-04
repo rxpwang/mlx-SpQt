@@ -292,7 +292,7 @@ Decision against shape-dependent dispatch:
   noise.
 - Adding shape-dependent logic in C++ creates maintenance burden for
   a 5% gain at niche shapes.
-- The take-home value-prop is the SpQt mechanism, not perfect
+- The deliverable's value-prop is the SpQt mechanism, not perfect
   microoptimization.
 
 ## 6. What's deferred for the MVP
@@ -316,8 +316,7 @@ Combined with the per-SG bounds check (already in place for the fine
 tail), this would handle arbitrary `n_total` cleanly.
 
 Estimated effort: ~30-45 minutes of kernel work + verification.
-Deferred for the take-home MVP since the assignment requires only
-single-shape correctness.
+Deferred for the MVP since only single-shape correctness is required.
 
 ### Other deferred optimizations
 

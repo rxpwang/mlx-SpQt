@@ -25,8 +25,9 @@ average; M1 and M2 weighted heavier.
 | 10:30–14:00 | 5. M1 — dense (3.5 min) |
 | 14:00–19:30 | 6. M2 — sparse + tuning (5.5 min) |
 | 19:30–22:30 | 7. Results (3 min) |
-| 22:30–24:30 | 8. Future work + integration (2 min) |
-| 24:30–25:00 | 9. Closing (0.5 min) |
+| 22:30–24:00 | 8. Phase 2 — Integration into MLX core (1.5 min) |
+| 24:00–24:30 | 9. Future work (0.5 min) |
+| 24:30–25:00 | 10. Closing (0.5 min) |
 | 25:00–30:00 | Q&A |
 
 ## Section 1 — SpQt idea (4 min)
@@ -54,6 +55,11 @@ against a less-tuned Q4_K path.
 
 MILESTONES.md as a visual.
 
+- **Two-phase plan**: build a standalone MLX *extension* first
+  (M0–M2, validates kernel + tuning in isolation), then *integrate*
+  the validated kernel into MLX core (I0–I5). Phase 1 de-risks
+  the kernel design; integrating an already-tested extension is
+  cheaper than going direct to core.
 - Staggered: M0 unblocks M1; M1's kernel structure is reused in
   M2 with only the K-walk changing (~10-line diff).
 - MVP focus: coarse-tail handling, multi-batch, and simd_sum
@@ -134,34 +140,45 @@ two regimes:
 - ≥8 MB weights: memory-bound; sparse wins.
 - LLM FFN shapes (~22 MB): ~1.8× at 75% sparsity.
 
-## Section 8 — Future work + integration (2 min)
+## Section 8 — Phase 2: Integration into MLX core (1.5 min)
 
-### Deferred from the kernel
+The narrative beat: "the extension wasn't the deliverable — it was
+the de-risking scaffold for the real deliverable, MLX-core
+integration. Building the extension first made the integration
+itself almost mechanical."
 
-- Coarse-tail handling for arbitrary densities — ~30 min of work,
-  deferred because the brief asks for a single arbitrary shape.
-- Within-SG `simd_sum` cross-lane reduce, multi-batch, CPU
-  fallback.
+- **API choice: standalone, not mode-dispatch.** Mode-dispatch
+  (`mx.quantized_matmul(mode='affine_zigzag')`) breaks for sparse:
+  `idx` has no meaning in the affine mode. For API consistency,
+  dense is standalone too.
+- **Surface**: `mx.zigzag_qmv_dense`, `mx.zigzag_qmv_sparse`
+  (mlx.core C++ Primitives mirroring `mx.quantized_matmul`'s
+  pattern), plus `mlx.spqt.quantize_zigzag`/`dequantize_zigzag`
+  Python helpers. Five sub-phases (I0–I5): structural map →
+  kernels + Primitives → op functions → bindings → tests → bench.
+- **Cost**: estimated 10 hours, took ~5. Cheaper than going direct
+  because the kernel and Primitive structure were already proven
+  in M1/M2 — left only API plumbing.
+- **Validation**: pytest passes 14 cases at 1e-3 threshold; perf
+  bench reproduces the 1.81× speedup at (4096, 11008) 75% sparsity
+  within ~5% of the extension version.
+
+## Section 9 — Future work (0.5 min)
+
+What's deferred (kernel-side and integration-side both):
+
+- Coarse-tail handling (densities like 0.6, 0.8 where
+  `n_total % 16 ≠ 0`); within-SG `simd_sum` reduce; multi-batch;
+  CPU fallback.
+- Multi-platform integration into MLX core (CPU + CUDA backends).
+  +6–10 days kernel work, weeks PR review.
 - Quantization-scheme comparison: MLX-affine (gs=64, flat scales)
-  and Q4_K (gs=256, hierarchical scales) differ along multiple
-  axes; the impact on the SpQt speedup ratio is left for future
+  vs Q4_K (gs=256, hierarchical scales) differ along multiple axes;
+  the impact on the SpQt speedup ratio is left for future
   investigation. `group_size=128` in MLX-affine is a natural
   starting point.
 
-### Path to MLX core integration
+## Section 10 — Closing (0.5 min)
 
-- Mode-dispatch (`mx.quantized_matmul(mode='affine_zigzag')`)
-  breaks for sparse: `idx` has no meaning in the affine mode,
-  forcing sparse to be standalone. For API consistency, dense
-  should be standalone as well.
-- Standalone integration: ~10 hours focused work (Metal-only).
-  Primitive into `mlx/backend/metal/quantized_zigzag.cpp`,
-  kernels into `mlx/backend/metal/kernels/quantized_zigzag.h`,
-  bindings as 4 new functions. Zero regression risk to the
-  existing affine path.
-- Multi-platform (CPU, CUDA): +6–10 days. PR review cycle: weeks.
-
-## Section 9 — Closing (0.5 min)
-
-- Repository: `github.com/rxpwang/mlx-SpQt`, branch `rxpwang/spqt`.
-- Demo: `cd extensions/mlx_spqt && python demo_spqt.py`.
+- Repository: `github.com/rxpwang/mlx-SpQt`.
+- Demo: `python demo_spqt.py` (integrated `mx.zigzag_qmv_*` API).

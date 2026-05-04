@@ -91,7 +91,8 @@ to an MLX-native quantization format, validated by:
 | M2  | Sparse-GEMV: M1 kernel + idx-driven K-walk | ✅ | Sparse op `zigzag_qmv_sparse` matches reference `< 1e-3` across 7 shapes × 2 densities. Threadgroup geometry tuned via 11-combo × 7-shape × 3-run sweep — default `(NSG=2, TG=4)`. See `investigations/M2-sparse-design.md`. |
 | M3  | Performance break-even               | ✅ | **Exceeded** — sparse beats `mx.quantized_matmul` by ~1.8× at 75% sparsity on LLM-FFN shapes; ~1.2× at 50%. Multi-shape × multi-density bench in `bench_zigzag_qmv_sparse.py`. |
 | M4  | Turn-key repo                        | ✅ | `python demo_spqt.py` reproduces both correctness + performance from a clean install; top-level `README.md` covers install + run + headline result. |
-| S1  | (Stretch) Metal sparse-indexing      | — | Port `kernel_sparse_indexing_v2` (Blelloch scan). Out of scope; idx is host-built for the take-home. |
+| I0–I5 | Integrate into MLX core             | ✅ | Move the validated extension into MLX core: kernel files into `mlx/backend/metal/`, Primitives into `mlx/primitives.{h,cpp}`, public op functions into `mlx/ops.{h,cpp}`, Python bindings exposing `mx.zigzag_qmv_*`, helpers exposed at `mlx.spqt.*`, pytest + bench reproduce within ~5%. See `investigations/I0..I5-design.md`. |
+| S1  | (Stretch) Metal sparse-indexing      | — | Port `kernel_sparse_indexing_v2` (Blelloch scan). Out of scope for the MVP; idx is host-built. |
 | S2  | (Stretch) Multi-shape correctness    | ✅ | Tests cover 7 shapes from 1024² to 4096×16384 (Llama-7B FFN sizes). |
 | S3  | (Stretch) GEMM/prefill path          | — | Zigzag GEMM analog of `kernel_mul_mm_zigzag`. Out of scope — GEMV-only deliverable. |
 
@@ -373,6 +374,31 @@ is the bar.
   entries.
 - Clean diff between `main` (vanilla upstream MLX) and `rxpwang/spqt` — the diff
   *is* the deliverable; should tell the porting story end-to-end.
+
+### I0–I5 — Integrate into MLX core
+
+Phase 2: take the validated extension and move it into MLX core itself, so
+the kernel is reachable as `mx.zigzag_qmv_*` (mirroring how `mx.quantized_matmul`
+is structured) rather than only via the standalone extension.
+
+Mostly mechanical work — the kernel and Primitive structure were already
+proven in M1/M2, so this phase was primarily API plumbing. Five sub-phases:
+
+| | What | Output |
+|---|---|---|
+| **I0** | Survey MLX core's quantized-op layout, identify the seven file locations a new op needs to touch | `investigations/I0-mlx-core-integration-map.md` |
+| **I1** | Move kernel + Primitive files into `mlx/backend/metal/`. Wire CMake. Build passes. | `quantized_zigzag.{cpp,h,metal}` |
+| **I2** | Add C++ op functions in `mlx/ops.{h,cpp}` mirroring `quantized_matmul`'s pattern | `mx::zigzag_qmv_dense` / `mx::zigzag_qmv_sparse` |
+| **I3** | nanobind Python bindings + Python helpers (`mlx.spqt`) | `mx.zigzag_qmv_*` callable from Python |
+| **I4** | Port pytest correctness suite to MLX's `python/tests/` layout | `python/tests/test_quantized_zigzag.py` |
+| **I5** | Smoke-validate headline numbers reproduce | `benchmarks/python/quantized_zigzag_bench.py` |
+
+Per-phase design docs in `investigations/I0..I5-design.md`. Validation: 14
+pytest cases pass at 1e-3 threshold; 1.81× speedup at (4096, 11008) 75% sparsity
+reproduces within 5% of the extension version.
+
+Out of scope (deferred): CPU/CUDA backends; JIT-source kernel registration
+(noJIT path is wired and is the default).
 
 ---
 
