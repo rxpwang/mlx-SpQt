@@ -64,6 +64,12 @@ For the full multi-shape × multi-density bench data and the threadgroup tuning 
 
 You need an Apple Silicon Mac (M1 or later — needed for `atomic<float>` and `atomic<int>` Metal features) and Python 3.8+.
 
+> **Metal Toolchain prerequisite (Xcode 16+ / macOS 15+).** Recent Xcode releases split the Metal compiler into a separately-downloadable component. If `pip install -e .` fails with `cannot execute tool 'metal' due to missing Metal Toolchain`, install it once:
+> ```bash
+> xcodebuild -downloadComponent MetalToolchain
+> ```
+> Verify with `xcrun -sdk macosx metal --version`, then retry the install.
+
 > **Branch matters.** The integrated `mx.zigzag_qmv_*` APIs and the Phase 2 artifacts (`mlx/backend/metal/quantized_zigzag.*`, `mlx.spqt`, `python/tests/test_quantized_zigzag.py`, `benchmarks/python/quantized_zigzag_bench.py`, top-level `demo_spqt.py`) live on the **`rxpwang/spqt-integrated`** branch. The earlier `rxpwang/spqt` branch contains only the Phase 1 extension. Make sure you're on the right branch before building.
 
 ```bash
