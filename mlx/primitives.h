@@ -1645,6 +1645,52 @@ class QuantizedMatmul : public UnaryPrimitive {
   bool transpose_;
 };
 
+class ZigzagQmvDense : public UnaryPrimitive {
+  public:
+    explicit ZigzagQmvDense(Stream stream, int group_size, int bits)
+        : UnaryPrimitive(stream), group_size_(group_size), bits_(bits) {}
+    void eval_cpu(const std::vector<array>& inputs, array& out) override {
+      throw std::runtime_error("ZigzagQmvDense is not implemented on CPU");
+    };
+    void eval_gpu(const std::vector<array>& inputs, array& out) override;
+
+    DEFINE_VMAP()
+    DEFINE_GRADS()
+    DEFINE_NAME(ZigzagQmvDense)
+    bool is_equivalent(const Primitive& other) const override;
+    std::vector<Shape> output_shapes(const std::vector<array>& inputs) override;
+    
+  private:
+    int group_size_;
+    int bits_;
+};
+
+class ZigzagQmvSparse : public UnaryPrimitive {
+  public:
+    explicit ZigzagQmvSparse(Stream stream, int group_size, int bits, int num_simdgroups, int threadgroups_per_band)
+        : UnaryPrimitive(stream),
+          group_size_(group_size),
+          bits_(bits),
+          num_simdgroups_(num_simdgroups),
+          threadgroups_per_band_(threadgroups_per_band) {}
+    void eval_cpu(const std::vector<array>& inputs, array& out) override {
+      throw std::runtime_error("ZigzagQmvSparse is not implemented on CPU");
+    };
+    void eval_gpu(const std::vector<array>& inputs, array& out) override;
+
+    DEFINE_VMAP()
+    DEFINE_GRADS()
+    DEFINE_NAME(ZigzagQmvSparse)
+    bool is_equivalent(const Primitive& other) const override;
+    std::vector<Shape> output_shapes(const std::vector<array>& inputs) override;
+    
+  private:
+    int group_size_;
+    int bits_;
+    int num_simdgroups_;
+    int threadgroups_per_band_;
+};
+
 class QQMatmul : public UnaryPrimitive {
  public:
   explicit QQMatmul(

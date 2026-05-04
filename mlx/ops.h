@@ -1481,6 +1481,30 @@ MLX_API array quantized_matmul(
     const std::string& mode = "affine",
     StreamOrDevice s = {});
 
+// SpQt zigzag-layout dense quantized GEMV
+MLX_API array zigzag_qmv_dense(
+    const array& x,
+    const array& w,
+    const array& scales,
+    const array& biases,
+    int group_size = 64,
+    int bits = 4,
+    StreamOrDevice s = {}
+);
+
+// SpQt zigzag-layout sparse quantized GEMV. sparse_indices holds the column indices of the non-zero blocks in w, with the 1st element to be the count of non-zero blocks.
+MLX_API array zigzag_qmv_sparse(
+    const array& x,
+    const array& sparse_indices,
+    const array& w,
+    const array& scales,
+    const array& biases,
+    int group_size = 64,
+    int bits = 4,
+    int num_simdgroups = 2,
+    int threadgroups_per_band = 4,
+    StreamOrDevice s = {});
+
 /** Quantize a matrix along its last axis */
 MLX_API std::vector<array> quantize(
     const array& w,

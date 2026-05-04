@@ -4526,6 +4526,125 @@ array quantized_matmul(
       std::move(inputs));
 }
 
+namespace {
+  void validate_zigzag_inputs(
+    const char* op_name,
+    const array& x,
+    const array& w,
+    const array& scales,
+    const array& biases,
+    int group_size,
+    int bits) {
+    // dtype checks
+    if (x.dtype() != float16) {
+      std::ostringstream msg;
+      msg << "[" << op_name << "] x must be float16, got " << x.dtype() << ".";
+      throw std::invalid_argument(msg.str());
+    }
+    if (w.dtype() != uint32) {
+      std::ostringstream msg;
+      msg << "[" << op_name << "] w must be uint32 (packed), got "
+          << w.dtype() << ".";
+      throw std::invalid_argument(msg.str());
+    }
+    if (scales.dtype() != float16 || biases.dtype() != float16) {
+      std::ostringstream msg;
+      msg << "[" << op_name
+          << "] scales and biases must be float16.";
+      throw std::invalid_argument(msg.str());
+    }
+    // bit-width / group-size: only group_size=64, bits=4 in MVP
+    if (group_size != 64 || bits != 4) {
+      std::ostringstream msg;
+      msg << "[" << op_name
+          << "] only group_size=64 and bits=4 are supported in MVP.";
+      throw std::invalid_argument(msg.str());
+    }
+    // shapes
+    // w: (M/gs, K, gs*bits/32) uint32 — first axis is row-bands
+    // scales/biases: (M/gs, K) — same n_bands as w
+    if (w.ndim() != 3 || scales.ndim() != 2 || biases.ndim() != 2) {
+      std::ostringstream msg;
+      msg << "[" << op_name
+          << "] expected w 3D, scales/biases 2D; got "
+          << "w.ndim()=" << w.ndim()
+          << " scales.ndim()=" << scales.ndim()
+          << " biases.ndim()=" << biases.ndim() << ".";
+      throw std::invalid_argument(msg.str());
+    }
+    if (w.shape(0) != scales.shape(0) ||
+        w.shape(0) != biases.shape(0)) {
+      std::ostringstream msg;
+      msg << "[" << op_name
+          << "] inconsistent n_bands across w/scales/biases.";
+      throw std::invalid_argument(msg.str());
+    }
+    if (x.shape(-1) != w.shape(1)) {
+      std::ostringstream msg;
+      msg << "[" << op_name
+          << "] x.shape(-1)=" << x.shape(-1)
+          << " must match w.shape(1)=" << w.shape(1) << " (K).";
+      throw std::invalid_argument(msg.str());
+    }
+  }
+} // namespace
+
+array zigzag_qmv_dense(
+    const array& x,
+    const array& w,
+    const array& scales,
+    const array& biases,
+    int group_size,
+    int bits,
+    StreamOrDevice s /* = {} */) {
+  validate_zigzag_inputs(
+      "zigzag_qmv_dense", x, w, scales, biases, group_size, bits);
+  
+  const int n_bands = scales.shape(0);
+  const int M = n_bands * group_size;
+  auto out_shape = x.shape();
+  out_shape.back() = M;
+
+  return array(
+      std::move(out_shape),
+      float32,
+      std::make_shared<ZigzagQmvDense>(to_stream(s), group_size, bits),
+      std::vector<array>{w, x, scales, biases});
+}
+
+array zigzag_qmv_sparse(
+  const array& x,
+  const array& sparse_indices,
+  const array& w,
+  const array& scales,
+  const array& biases,
+  int group_size,
+  int bits,
+  int num_simdgroups,
+  int threadgroups_per_band,
+  StreamOrDevice s /* = {} */) {
+  validate_zigzag_inputs(
+      "zigzag_qmv_sparse", x, w, scales, biases, group_size, bits);
+  if (sparse_indices.dtype() != int32) {
+    std::ostringstream msg;
+    msg << "[zigzag_qmv_sparse] sparse_indices must be int32, got "
+        << sparse_indices.dtype() << ".";
+    throw std::invalid_argument(msg.str());
+  }
+
+  const int n_bands = scales.shape(0);
+  const int M = n_bands * group_size;
+  auto out_shape = x.shape();
+  out_shape.back() = M;
+
+  return array(
+      std::move(out_shape),
+      float32,
+      std::make_shared<ZigzagQmvSparse>(
+          to_stream(s), group_size, bits, num_simdgroups, threadgroups_per_band),
+      std::vector<array>{w, x, scales, biases, sparse_indices});
+}
+
 void validate_qqmm_inputs(
     array x,
     array w,

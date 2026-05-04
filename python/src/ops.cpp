@@ -4350,6 +4350,78 @@ void init_ops(nb::module_& m) {
           array: The result of the multiplication of ``x`` with ``w``.
       )pbdoc");
   m.def(
+    "zigzag_qmv_dense",
+    &mx::zigzag_qmv_dense,
+    nb::arg(),
+    nb::arg(),
+    "scales"_a,
+    "biases"_a,
+    "group_size"_a = 64,
+    "bits"_a = 4,
+    nb::kw_only(),
+    "stream"_a = nb::none(),
+    nb::sig(
+        "def zigzag_qmv_dense(x: array, w: array, /, scales: array, biases: array, group_size: int = 64, bits: int = 4, *, stream: Union[None, Stream, Device] = None) -> array"),
+    R"pbdoc(
+      SpQt zigzag-layout dense quantized GEMV.
+      See https://arxiv.org/abs/2511.04477.
+      Args:
+        x (array): Input activations of shape ``(B, K)``, dtype
+          float16.
+        w (array): Zigzag-packed quantized weights of shape
+          ``(M/group_size, K, group_size*bits/32)``, dtype uint32.
+        scales (array): Per-group scales of shape ``(M/group_size,
+          K)``, dtype float16.
+        biases (array): Per-group biases of shape ``(M/group_size,
+          K)``, dtype float16.
+        group_size (int, optional): Quantization group size /
+          row-band size. Default: ``64``.
+        bits (int, optional): Bits per quantized weight. Default:
+          ``4``.
+      Returns:
+          array: Result of ``x @ dequantize(w).T``, shape ``(B, M)``,
+          dtype float32.
+    )pbdoc");
+
+   m.def(
+    "zigzag_qmv_sparse",
+    &mx::zigzag_qmv_sparse,
+    nb::arg(),
+    nb::arg(),
+    nb::arg(),
+    "scales"_a,
+    "biases"_a,
+    "group_size"_a = 64,
+    "bits"_a = 4,
+    "num_simdgroups"_a = 2,
+    "threadgroups_per_band"_a = 4,
+    nb::kw_only(),
+    "stream"_a = nb::none(),
+    nb::sig(
+        "def zigzag_qmv_sparse(x: array, sparse_indices: array, w: array, /, scales: array, biases: array, group_size: int = 64, bits: int = 4, num_simdgroups: int = 2, threadgroups_per_band: int = 4, *, stream: Union[None, Stream, Device] = None) -> array"),
+    R"pbdoc(
+      SpQt zigzag-layout sparse quantized GEMV.
+      See https://arxiv.org/abs/2511.04477.
+      Args:
+        x (array): Input activations of shape ``(B, K)``, dtype
+          float16.
+        sparse_indices (array): Selected K-positions in count-prefix
+          format ``[n, idx_0, ..., idx_{n-1}]``, dtype int32.
+        w (array): Zigzag-packed quantized weights, dtype uint32.
+        scales (array): Per-group scales, dtype float16.
+        biases (array): Per-group biases, dtype float16.
+        group_size (int, optional): Default: ``64``.
+        bits (int, optional): Default: ``4``.
+        num_simdgroups (int, optional): Threadgroup geometry —
+          simdgroups per threadgroup. Default: ``2``.
+        threadgroups_per_band (int, optional): Threadgroup
+          geometry — threadgroups per row-band. Default: ``4``.
+      Returns:
+        array: ``x[:, idx] @ dequantize(w)[:, idx].T``, shape
+        ``(B, M)``, dtype float32.
+      )pbdoc");
+ 
+   m.def(
       "quantize",
       &mx::quantize,
       nb::arg(),

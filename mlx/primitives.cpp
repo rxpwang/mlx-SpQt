@@ -3560,6 +3560,70 @@ std::vector<Shape> QuantizedMatmul::output_shapes(
   return {std::move(out_shape)};
 }
 
+bool ZigzagQmvDense::is_equivalent(const Primitive& other) const {
+  const ZigzagQmvDense& qm_other = static_cast<const ZigzagQmvDense&>(other);
+  return group_size_ == qm_other.group_size_ && bits_ == qm_other.bits_;
+}
+
+std::vector<Shape> ZigzagQmvDense::output_shapes(const std::vector<array>& inputs) {
+  // inputs = {w_zz, x, scales, biases}
+  const int n_bands = inputs[2].shape(0);
+  const int M = n_bands * group_size_;
+  auto out_shape = inputs[1].shape();
+  out_shape.back() = M;
+  return {std::move(out_shape)};
+}
+
+bool ZigzagQmvSparse::is_equivalent(const Primitive& other) const {
+  const ZigzagQmvSparse& qm_other = static_cast<const ZigzagQmvSparse&>(other);
+  return group_size_ == qm_other.group_size_ && bits_ == qm_other.bits_ && num_simdgroups_ == qm_other.num_simdgroups_ && threadgroups_per_band_ == qm_other.threadgroups_per_band_;
+}
+
+std::vector<Shape> ZigzagQmvSparse::output_shapes(const std::vector<array>& inputs) {
+  // inputs = {w_zz, x, scales, biases, sparse_indices}
+  const int n_bands = inputs[2].shape(0);
+  const int M = n_bands * group_size_;
+  auto out_shape = inputs[1].shape();
+  out_shape.back() = M;
+  return {std::move(out_shape)};
+}
+
+std::pair<std::vector<array>, std::vector<int>> ZigzagQmvDense::vmap(
+    const std::vector<array>&, const std::vector<int>&) {
+  throw std::runtime_error("[ZigzagQmvDense::vmap] NYI");
+}
+std::vector<array> ZigzagQmvDense::jvp(
+    const std::vector<array>&,
+    const std::vector<array>&,
+    const std::vector<int>&) {
+  throw std::runtime_error("[ZigzagQmvDense::jvp] NYI");
+}
+std::vector<array> ZigzagQmvDense::vjp(
+    const std::vector<array>&,
+    const std::vector<array>&,
+    const std::vector<int>&,
+    const std::vector<array>&) {
+  throw std::runtime_error("[ZigzagQmvDense::vjp] NYI");
+}
+
+std::pair<std::vector<array>, std::vector<int>> ZigzagQmvSparse::vmap(
+    const std::vector<array>&, const std::vector<int>&) {
+  throw std::runtime_error("[ZigzagQmvSparse::vmap] NYI");
+}
+std::vector<array> ZigzagQmvSparse::jvp(
+    const std::vector<array>&,
+    const std::vector<array>&,
+    const std::vector<int>&) {
+  throw std::runtime_error("[ZigzagQmvSparse::jvp] NYI");
+}
+std::vector<array> ZigzagQmvSparse::vjp(
+    const std::vector<array>&,
+    const std::vector<array>&,
+    const std::vector<int>&,
+    const std::vector<array>&) {
+  throw std::runtime_error("[ZigzagQmvSparse::vjp] NYI");
+}
+
 bool QQMatmul::is_equivalent(const Primitive& other) const {
   const QQMatmul& qm_other = static_cast<const QQMatmul&>(other);
   return group_size_ == qm_other.group_size_ && bits_ == qm_other.bits_ &&
