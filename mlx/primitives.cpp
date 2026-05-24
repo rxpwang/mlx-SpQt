@@ -3624,6 +3624,199 @@ std::vector<array> ZigzagQmvSparse::vjp(
   throw std::runtime_error("[ZigzagQmvSparse::vjp] NYI");
 }
 
+bool ZigzagQmvDenseFast::is_equivalent(const Primitive& other) const {
+  const ZigzagQmvDenseFast& qm_other = static_cast<const ZigzagQmvDenseFast&>(other);
+  return group_size_ == qm_other.group_size_ && bits_ == qm_other.bits_
+      && num_simdgroups_ == qm_other.num_simdgroups_
+      && results_per_simdgroup_ == qm_other.results_per_simdgroup_;
+}
+
+std::vector<Shape> ZigzagQmvDenseFast::output_shapes(const std::vector<array>& inputs) {
+  // inputs = {w_zz, x, scales, biases}
+  const int n_bands = inputs[2].shape(0);
+  const int M = n_bands * group_size_;
+  auto out_shape = inputs[1].shape();
+  out_shape.back() = M;
+  return {std::move(out_shape)};
+}
+
+std::pair<std::vector<array>, std::vector<int>> ZigzagQmvDenseFast::vmap(
+    const std::vector<array>&, const std::vector<int>&) {
+  throw std::runtime_error("[ZigzagQmvDenseFast::vmap] NYI");
+}
+std::vector<array> ZigzagQmvDenseFast::jvp(
+    const std::vector<array>&,
+    const std::vector<array>&,
+    const std::vector<int>&) {
+  throw std::runtime_error("[ZigzagQmvDenseFast::jvp] NYI");
+}
+std::vector<array> ZigzagQmvDenseFast::vjp(
+    const std::vector<array>&,
+    const std::vector<array>&,
+    const std::vector<int>&,
+    const std::vector<array>&) {
+  throw std::runtime_error("[ZigzagQmvDenseFast::vjp] NYI");
+}
+
+bool FusedSiluMskipQmv::is_equivalent(const Primitive& other) const {
+  const FusedSiluMskipQmv& qm_other = static_cast<const FusedSiluMskipQmv&>(other);
+  return group_size_ == qm_other.group_size_
+      && bits_ == qm_other.bits_
+      && num_simdgroups_ == qm_other.num_simdgroups_
+      && threshold_ == qm_other.threshold_;
+}
+
+std::vector<Shape> FusedSiluMskipQmv::output_shapes(const std::vector<array>& inputs) {
+  // inputs = {w, scales, biases, x, gate_out}
+  // Output shape: same as gate_out (M_inter,) or (..., M_inter) following x's batch dims.
+  const int M = inputs[0].shape(0);
+  auto out_shape = inputs[3].shape();
+  out_shape.back() = M;
+  return {std::move(out_shape)};
+}
+
+std::pair<std::vector<array>, std::vector<int>> FusedSiluMskipQmv::vmap(
+    const std::vector<array>&, const std::vector<int>&) {
+  throw std::runtime_error("[FusedSiluMskipQmv::vmap] NYI");
+}
+std::vector<array> FusedSiluMskipQmv::jvp(
+    const std::vector<array>&,
+    const std::vector<array>&,
+    const std::vector<int>&) {
+  throw std::runtime_error("[FusedSiluMskipQmv::jvp] NYI");
+}
+std::vector<array> FusedSiluMskipQmv::vjp(
+    const std::vector<array>&,
+    const std::vector<array>&,
+    const std::vector<int>&,
+    const std::vector<array>&) {
+  throw std::runtime_error("[FusedSiluMskipQmv::vjp] NYI");
+}
+
+bool MskipQmv::is_equivalent(const Primitive& other) const {
+  const MskipQmv& qm_other = static_cast<const MskipQmv&>(other);
+  return group_size_ == qm_other.group_size_
+      && bits_ == qm_other.bits_
+      && num_simdgroups_ == qm_other.num_simdgroups_;
+}
+
+std::vector<Shape> MskipQmv::output_shapes(const std::vector<array>& inputs) {
+  // inputs = {w, scales, biases, x, mask}
+  // w shape: (M, K_packed), output: (..., M) with batch dims from x.
+  const int M = inputs[0].shape(0);
+  auto out_shape = inputs[3].shape();
+  out_shape.back() = M;
+  return {std::move(out_shape)};
+}
+
+std::pair<std::vector<array>, std::vector<int>> MskipQmv::vmap(
+    const std::vector<array>&, const std::vector<int>&) {
+  throw std::runtime_error("[MskipQmv::vmap] NYI");
+}
+std::vector<array> MskipQmv::jvp(
+    const std::vector<array>&,
+    const std::vector<array>&,
+    const std::vector<int>&) {
+  throw std::runtime_error("[MskipQmv::jvp] NYI");
+}
+std::vector<array> MskipQmv::vjp(
+    const std::vector<array>&,
+    const std::vector<array>&,
+    const std::vector<int>&,
+    const std::vector<array>&) {
+  throw std::runtime_error("[MskipQmv::vjp] NYI");
+}
+
+bool ZigzagSparseIndexingQKV::is_equivalent(const Primitive& other) const {
+  const ZigzagSparseIndexingQKV& qm_other = static_cast<const ZigzagSparseIndexingQKV&>(other);
+  return tau_q_ == qm_other.tau_q_ && tau_k_ == qm_other.tau_k_ && tau_v_ == qm_other.tau_v_;
+}
+
+std::vector<Shape> ZigzagSparseIndexingQKV::output_shapes(const std::vector<array>& inputs) {
+  // inputs = {x}, output is int32 of size 3*(K+1) — three packed count-prefix slots.
+  const int K = inputs[0].shape(-1);
+  return {{3 * (K + 1)}};
+}
+
+std::pair<std::vector<array>, std::vector<int>> ZigzagSparseIndexingQKV::vmap(
+    const std::vector<array>&, const std::vector<int>&) {
+  throw std::runtime_error("[ZigzagSparseIndexingQKV::vmap] NYI");
+}
+std::vector<array> ZigzagSparseIndexingQKV::jvp(
+    const std::vector<array>&,
+    const std::vector<array>&,
+    const std::vector<int>&) {
+  throw std::runtime_error("[ZigzagSparseIndexingQKV::jvp] NYI");
+}
+std::vector<array> ZigzagSparseIndexingQKV::vjp(
+    const std::vector<array>&,
+    const std::vector<array>&,
+    const std::vector<int>&,
+    const std::vector<array>&) {
+  throw std::runtime_error("[ZigzagSparseIndexingQKV::vjp] NYI");
+}
+
+bool ZigzagSparseIndexing::is_equivalent(const Primitive& other) const {
+  const ZigzagSparseIndexing& qm_other = static_cast<const ZigzagSparseIndexing&>(other);
+  return threshold_ == qm_other.threshold_;
+}
+
+std::vector<Shape> ZigzagSparseIndexing::output_shapes(const std::vector<array>& inputs) {
+  // inputs = {x}, output is int32 array of size K+1 (count-prefix).
+  const int K = inputs[0].shape(-1);
+  return {{K + 1}};
+}
+
+std::pair<std::vector<array>, std::vector<int>> ZigzagSparseIndexing::vmap(
+    const std::vector<array>&, const std::vector<int>&) {
+  throw std::runtime_error("[ZigzagSparseIndexing::vmap] NYI");
+}
+std::vector<array> ZigzagSparseIndexing::jvp(
+    const std::vector<array>&,
+    const std::vector<array>&,
+    const std::vector<int>&) {
+  throw std::runtime_error("[ZigzagSparseIndexing::jvp] NYI");
+}
+std::vector<array> ZigzagSparseIndexing::vjp(
+    const std::vector<array>&,
+    const std::vector<array>&,
+    const std::vector<int>&,
+    const std::vector<array>&) {
+  throw std::runtime_error("[ZigzagSparseIndexing::vjp] NYI");
+}
+
+bool ZigzagQmvMskip::is_equivalent(const Primitive& other) const {
+  const ZigzagQmvMskip& qm_other = static_cast<const ZigzagQmvMskip&>(other);
+  return group_size_ == qm_other.group_size_ && bits_ == qm_other.bits_;
+}
+
+std::vector<Shape> ZigzagQmvMskip::output_shapes(const std::vector<array>& inputs) {
+  // inputs = {w_zz, x, scales, biases, active_indices}
+  const int n_bands = inputs[2].shape(0);
+  const int M = n_bands * group_size_;
+  auto out_shape = inputs[1].shape();
+  out_shape.back() = M;
+  return {std::move(out_shape)};
+}
+
+std::pair<std::vector<array>, std::vector<int>> ZigzagQmvMskip::vmap(
+    const std::vector<array>&, const std::vector<int>&) {
+  throw std::runtime_error("[ZigzagQmvMskip::vmap] NYI");
+}
+std::vector<array> ZigzagQmvMskip::jvp(
+    const std::vector<array>&,
+    const std::vector<array>&,
+    const std::vector<int>&) {
+  throw std::runtime_error("[ZigzagQmvMskip::jvp] NYI");
+}
+std::vector<array> ZigzagQmvMskip::vjp(
+    const std::vector<array>&,
+    const std::vector<array>&,
+    const std::vector<int>&,
+    const std::vector<array>&) {
+  throw std::runtime_error("[ZigzagQmvMskip::vjp] NYI");
+}
+
 bool QQMatmul::is_equivalent(const Primitive& other) const {
   const QQMatmul& qm_other = static_cast<const QQMatmul&>(other);
   return group_size_ == qm_other.group_size_ && bits_ == qm_other.bits_ &&

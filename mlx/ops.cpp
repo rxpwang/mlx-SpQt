@@ -4535,10 +4535,10 @@ namespace {
     const array& biases,
     int group_size,
     int bits) {
-    // dtype checks
-    if (x.dtype() != float16) {
+    // dtype checks — accept fp16 or bf16 (must match across x/scales/biases).
+    if (x.dtype() != float16 && x.dtype() != bfloat16) {
       std::ostringstream msg;
-      msg << "[" << op_name << "] x must be float16, got " << x.dtype() << ".";
+      msg << "[" << op_name << "] x must be float16 or bfloat16, got " << x.dtype() << ".";
       throw std::invalid_argument(msg.str());
     }
     if (w.dtype() != uint32) {
@@ -4547,17 +4547,20 @@ namespace {
           << w.dtype() << ".";
       throw std::invalid_argument(msg.str());
     }
-    if (scales.dtype() != float16 || biases.dtype() != float16) {
+    if (scales.dtype() != x.dtype() || biases.dtype() != x.dtype()) {
       std::ostringstream msg;
       msg << "[" << op_name
-          << "] scales and biases must be float16.";
+          << "] scales/biases dtype must match x's dtype. Got x=" << x.dtype()
+          << " scales=" << scales.dtype() << " biases=" << biases.dtype() << ".";
       throw std::invalid_argument(msg.str());
     }
-    // bit-width / group-size: only group_size=64, bits=4 in MVP
-    if (group_size != 64 || bits != 4) {
+    // bit-width / group-size: group_size locked to 64; bits ∈ {4, 6, 8}
+    // (4 from MVP; 6, 8 added in Stage 2 — bits=6 still pending kernel work).
+    if (group_size != 64 || (bits != 4 && bits != 6 && bits != 8)) {
       std::ostringstream msg;
       msg << "[" << op_name
-          << "] only group_size=64 and bits=4 are supported in MVP.";
+          << "] group_size must be 64 and bits must be one of {4, 6, 8}; got "
+          << "group_size=" << group_size << ", bits=" << bits << ".";
       throw std::invalid_argument(msg.str());
     }
     // shapes
@@ -4643,6 +4646,212 @@ array zigzag_qmv_sparse(
       std::make_shared<ZigzagQmvSparse>(
           to_stream(s), group_size, bits, num_simdgroups, threadgroups_per_band),
       std::vector<array>{w, x, scales, biases, sparse_indices});
+}
+
+array zigzag_qmv_dense_fast(
+    const array& x,
+    const array& w,
+    const array& scales,
+    const array& biases,
+    int group_size,
+    int bits,
+    int num_simdgroups,
+    int results_per_simdgroup,
+    StreamOrDevice s /* = {} */) {
+  validate_zigzag_inputs(
+      "zigzag_qmv_dense_fast", x, w, scales, biases, group_size, bits);
+  if (num_simdgroups * results_per_simdgroup != group_size) {
+    std::ostringstream msg;
+    msg << "[zigzag_qmv_dense_fast] num_simdgroups (" << num_simdgroups
+        << ") * results_per_simdgroup (" << results_per_simdgroup
+        << ") must equal group_size (" << group_size << ").";
+    throw std::invalid_argument(msg.str());
+  }
+  if (results_per_simdgroup % 4 != 0) {
+    std::ostringstream msg;
+    msg << "[zigzag_qmv_dense_fast] results_per_simdgroup must be a multiple of 4; got "
+        << results_per_simdgroup << ".";
+    throw std::invalid_argument(msg.str());
+  }
+
+  const int n_bands = scales.shape(0);
+  const int M = n_bands * group_size;
+  auto out_shape = x.shape();
+  out_shape.back() = M;
+
+  return array(
+      std::move(out_shape),
+      float32,
+      std::make_shared<ZigzagQmvDenseFast>(
+          to_stream(s), group_size, bits, num_simdgroups, results_per_simdgroup),
+      std::vector<array>{w, x, scales, biases});
+}
+
+array fused_silu_mskip_qmv(
+    const array& w,
+    const array& scales,
+    const array& biases,
+    const array& x,
+    const array& gate_out,
+    float threshold,
+    int group_size,
+    int bits,
+    int num_simdgroups,
+    StreamOrDevice s /* = {} */) {
+  if (x.dtype() != float16 && x.dtype() != bfloat16) {
+    std::ostringstream msg;
+    msg << "[fused_silu_mskip_qmv] x must be float16 or bfloat16. Got " << x.dtype() << ".";
+    throw std::invalid_argument(msg.str());
+  }
+  if (gate_out.dtype() != x.dtype()) {
+    throw std::invalid_argument(
+        "[fused_silu_mskip_qmv] gate_out must have the same dtype as x.");
+  }
+  if (scales.dtype() != x.dtype() || biases.dtype() != x.dtype()) {
+    throw std::invalid_argument(
+        "[fused_silu_mskip_qmv] scales and biases must have the same dtype as x.");
+  }
+  if (w.dtype() != uint32) {
+    throw std::invalid_argument("[fused_silu_mskip_qmv] w must be uint32 (packed).");
+  }
+  if (group_size != 64 || (bits != 4 && bits != 6 && bits != 8)) {
+    throw std::invalid_argument(
+        "[fused_silu_mskip_qmv] group_size must be 64, bits in {4, 6, 8}.");
+  }
+
+  const int M = w.shape(0);
+  auto out_shape = x.shape();
+  out_shape.back() = M;
+
+  return array(
+      std::move(out_shape),
+      x.dtype(),
+      std::make_shared<FusedSiluMskipQmv>(to_stream(s), group_size, bits, num_simdgroups, threshold),
+      std::vector<array>{w, scales, biases, x, gate_out});
+}
+
+array mskip_qmv(
+    const array& w,
+    const array& scales,
+    const array& biases,
+    const array& x,
+    const array& mask,
+    int group_size,
+    int bits,
+    int num_simdgroups,
+    StreamOrDevice s /* = {} */) {
+  if ((x.dtype() != float16 && x.dtype() != bfloat16)
+      || scales.dtype() != x.dtype() || biases.dtype() != x.dtype()) {
+    std::ostringstream msg;
+    msg << "[mskip_qmv] x must be float16 or bfloat16, with scales/biases matching. Got x="
+        << x.dtype() << " scales=" << scales.dtype() << " biases=" << biases.dtype() << ".";
+    throw std::invalid_argument(msg.str());
+  }
+  if (w.dtype() != uint32) {
+    std::ostringstream msg;
+    msg << "[mskip_qmv] w must be uint32 (packed). Got " << w.dtype() << ".";
+    throw std::invalid_argument(msg.str());
+  }
+  if (mask.dtype() != uint8) {
+    std::ostringstream msg;
+    msg << "[mskip_qmv] mask must be uint8. Got " << mask.dtype() << ".";
+    throw std::invalid_argument(msg.str());
+  }
+  if (group_size != 64 || (bits != 4 && bits != 6 && bits != 8)) {
+    std::ostringstream msg;
+    msg << "[mskip_qmv] group_size must be 64, bits in {4,6,8}; got group_size="
+        << group_size << " bits=" << bits << ".";
+    throw std::invalid_argument(msg.str());
+  }
+
+  // w: (M, K_packed)  → M from w.shape(0)
+  const int M = w.shape(0);
+  auto out_shape = x.shape();
+  out_shape.back() = M;
+
+  return array(
+      std::move(out_shape),
+      x.dtype(),
+      std::make_shared<MskipQmv>(to_stream(s), group_size, bits, num_simdgroups),
+      std::vector<array>{w, scales, biases, x, mask});
+}
+
+array zigzag_sparse_indexing_qkv(
+    const array& x,
+    float tau_q,
+    float tau_k,
+    float tau_v,
+    StreamOrDevice s /* = {} */) {
+  if (x.dtype() != float16 && x.dtype() != bfloat16) {
+    std::ostringstream msg;
+    msg << "[zigzag_sparse_indexing_qkv] x must be float16 or bfloat16, got "
+        << x.dtype() << ".";
+    throw std::invalid_argument(msg.str());
+  }
+  if (x.ndim() < 1) {
+    throw std::invalid_argument(
+        "[zigzag_sparse_indexing_qkv] x must have at least one dim.");
+  }
+  const int K = x.shape(-1);
+  Shape out_shape = {3 * (K + 1)};
+  return array(
+      std::move(out_shape),
+      int32,
+      std::make_shared<ZigzagSparseIndexingQKV>(to_stream(s), tau_q, tau_k, tau_v),
+      std::vector<array>{x});
+}
+
+array zigzag_sparse_indexing(
+    const array& x,
+    float threshold,
+    StreamOrDevice s /* = {} */) {
+  if (x.dtype() != float16 && x.dtype() != bfloat16) {
+    std::ostringstream msg;
+    msg << "[zigzag_sparse_indexing] x must be float16 or bfloat16, got "
+        << x.dtype() << ".";
+    throw std::invalid_argument(msg.str());
+  }
+  if (x.ndim() < 1) {
+    throw std::invalid_argument(
+        "[zigzag_sparse_indexing] x must have at least one dim.");
+  }
+  const int K = x.shape(-1);
+  Shape out_shape = {K + 1};
+  return array(
+      std::move(out_shape),
+      int32,
+      std::make_shared<ZigzagSparseIndexing>(to_stream(s), threshold),
+      std::vector<array>{x});
+}
+
+array zigzag_qmv_mskip(
+    const array& x,
+    const array& active_indices,
+    const array& w,
+    const array& scales,
+    const array& biases,
+    int group_size,
+    int bits,
+    StreamOrDevice s /* = {} */) {
+  validate_zigzag_inputs(
+      "zigzag_qmv_mskip", x, w, scales, biases, group_size, bits);
+  if (active_indices.dtype() != int32) {
+    std::ostringstream msg;
+    msg << "[zigzag_qmv_mskip] active_indices must be int32, got "
+        << active_indices.dtype() << ".";
+    throw std::invalid_argument(msg.str());
+  }
+
+  const int n_bands = scales.shape(0);
+  const int M = n_bands * group_size;
+  auto out_shape = x.shape();
+  out_shape.back() = M;
+
+  return array(
+      std::move(out_shape),
+      float32,
+      std::make_shared<ZigzagQmvMskip>(to_stream(s), group_size, bits),
+      std::vector<array>{w, x, scales, biases, active_indices});
 }
 
 void validate_qqmm_inputs(

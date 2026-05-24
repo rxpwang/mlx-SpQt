@@ -1683,12 +1683,147 @@ class ZigzagQmvSparse : public UnaryPrimitive {
     DEFINE_NAME(ZigzagQmvSparse)
     bool is_equivalent(const Primitive& other) const override;
     std::vector<Shape> output_shapes(const std::vector<array>& inputs) override;
-    
+
   private:
     int group_size_;
     int bits_;
     int num_simdgroups_;
     int threadgroups_per_band_;
+};
+
+class ZigzagQmvDenseFast : public UnaryPrimitive {
+  public:
+    explicit ZigzagQmvDenseFast(Stream stream, int group_size, int bits, int num_simdgroups, int results_per_simdgroup)
+        : UnaryPrimitive(stream),
+          group_size_(group_size),
+          bits_(bits),
+          num_simdgroups_(num_simdgroups),
+          results_per_simdgroup_(results_per_simdgroup) {}
+    void eval_cpu(const std::vector<array>& inputs, array& out) override {
+      throw std::runtime_error("ZigzagQmvDenseFast is not implemented on CPU");
+    };
+    void eval_gpu(const std::vector<array>& inputs, array& out) override;
+
+    DEFINE_VMAP()
+    DEFINE_GRADS()
+    DEFINE_NAME(ZigzagQmvDenseFast)
+    bool is_equivalent(const Primitive& other) const override;
+    std::vector<Shape> output_shapes(const std::vector<array>& inputs) override;
+
+  private:
+    int group_size_;
+    int bits_;
+    int num_simdgroups_;
+    int results_per_simdgroup_;
+};
+
+class FusedSiluMskipQmv : public UnaryPrimitive {
+  public:
+    explicit FusedSiluMskipQmv(Stream stream, int group_size, int bits, int num_simdgroups, float threshold)
+        : UnaryPrimitive(stream),
+          group_size_(group_size), bits_(bits),
+          num_simdgroups_(num_simdgroups), threshold_(threshold) {}
+    void eval_cpu(const std::vector<array>& inputs, array& out) override {
+      throw std::runtime_error("FusedSiluMskipQmv is not implemented on CPU");
+    };
+    void eval_gpu(const std::vector<array>& inputs, array& out) override;
+
+    DEFINE_VMAP()
+    DEFINE_GRADS()
+    DEFINE_NAME(FusedSiluMskipQmv)
+    bool is_equivalent(const Primitive& other) const override;
+    std::vector<Shape> output_shapes(const std::vector<array>& inputs) override;
+
+  private:
+    int group_size_;
+    int bits_;
+    int num_simdgroups_;
+    float threshold_;
+};
+
+class MskipQmv : public UnaryPrimitive {
+  public:
+    explicit MskipQmv(Stream stream, int group_size, int bits, int num_simdgroups)
+        : UnaryPrimitive(stream),
+          group_size_(group_size),
+          bits_(bits),
+          num_simdgroups_(num_simdgroups) {}
+    void eval_cpu(const std::vector<array>& inputs, array& out) override {
+      throw std::runtime_error("MskipQmv is not implemented on CPU");
+    };
+    void eval_gpu(const std::vector<array>& inputs, array& out) override;
+
+    DEFINE_VMAP()
+    DEFINE_GRADS()
+    DEFINE_NAME(MskipQmv)
+    bool is_equivalent(const Primitive& other) const override;
+    std::vector<Shape> output_shapes(const std::vector<array>& inputs) override;
+
+  private:
+    int group_size_;
+    int bits_;
+    int num_simdgroups_;
+};
+
+class ZigzagSparseIndexingQKV : public UnaryPrimitive {
+  public:
+    explicit ZigzagSparseIndexingQKV(Stream stream, float tau_q, float tau_k, float tau_v)
+        : UnaryPrimitive(stream),
+          tau_q_(tau_q), tau_k_(tau_k), tau_v_(tau_v) {}
+    void eval_cpu(const std::vector<array>& inputs, array& out) override {
+      throw std::runtime_error("ZigzagSparseIndexingQKV is not implemented on CPU");
+    };
+    void eval_gpu(const std::vector<array>& inputs, array& out) override;
+
+    DEFINE_VMAP()
+    DEFINE_GRADS()
+    DEFINE_NAME(ZigzagSparseIndexingQKV)
+    bool is_equivalent(const Primitive& other) const override;
+    std::vector<Shape> output_shapes(const std::vector<array>& inputs) override;
+
+  private:
+    float tau_q_;
+    float tau_k_;
+    float tau_v_;
+};
+
+class ZigzagSparseIndexing : public UnaryPrimitive {
+  public:
+    explicit ZigzagSparseIndexing(Stream stream, float threshold)
+        : UnaryPrimitive(stream), threshold_(threshold) {}
+    void eval_cpu(const std::vector<array>& inputs, array& out) override {
+      throw std::runtime_error("ZigzagSparseIndexing is not implemented on CPU");
+    };
+    void eval_gpu(const std::vector<array>& inputs, array& out) override;
+
+    DEFINE_VMAP()
+    DEFINE_GRADS()
+    DEFINE_NAME(ZigzagSparseIndexing)
+    bool is_equivalent(const Primitive& other) const override;
+    std::vector<Shape> output_shapes(const std::vector<array>& inputs) override;
+
+  private:
+    float threshold_;
+};
+
+class ZigzagQmvMskip : public UnaryPrimitive {
+  public:
+    explicit ZigzagQmvMskip(Stream stream, int group_size, int bits)
+        : UnaryPrimitive(stream), group_size_(group_size), bits_(bits) {}
+    void eval_cpu(const std::vector<array>& inputs, array& out) override {
+      throw std::runtime_error("ZigzagQmvMskip is not implemented on CPU");
+    };
+    void eval_gpu(const std::vector<array>& inputs, array& out) override;
+
+    DEFINE_VMAP()
+    DEFINE_GRADS()
+    DEFINE_NAME(ZigzagQmvMskip)
+    bool is_equivalent(const Primitive& other) const override;
+    std::vector<Shape> output_shapes(const std::vector<array>& inputs) override;
+
+  private:
+    int group_size_;
+    int bits_;
 };
 
 class QQMatmul : public UnaryPrimitive {

@@ -1492,6 +1492,23 @@ MLX_API array zigzag_qmv_dense(
     StreamOrDevice s = {}
 );
 
+// SpQt zigzag-layout dense quantized GEMV — "fast" variant optimized for the
+// overhead-bound regime (≤4 MB weights). Same logical math as zigzag_qmv_dense
+// but uses a single-TG-per-band design with simd_sum reduction (no cross-TG
+// atomics, no zero-fill prepass). num_simdgroups * results_per_simdgroup must
+// equal group_size.
+MLX_API array zigzag_qmv_dense_fast(
+    const array& x,
+    const array& w,
+    const array& scales,
+    const array& biases,
+    int group_size = 64,
+    int bits = 4,
+    int num_simdgroups = 16,
+    int results_per_simdgroup = 4,
+    StreamOrDevice s = {}
+);
+
 // SpQt zigzag-layout sparse quantized GEMV. sparse_indices holds the column indices of the non-zero blocks in w, with the 1st element to be the count of non-zero blocks.
 MLX_API array zigzag_qmv_sparse(
     const array& x,
@@ -1503,6 +1520,94 @@ MLX_API array zigzag_qmv_sparse(
     int bits = 4,
     int num_simdgroups = 2,
     int threadgroups_per_band = 4,
+    StreamOrDevice s = {});
+
+// Fused FFN block kernel: silu(gate_out) + threshold-mask + M-skip up_proj
+// GEMV + elementwise multiply, all in one dispatch. For DejaVu-up self-pred
+// path. Eliminates 3-4 dispatch overheads vs the Python composition.
+//
+// Inputs:
+//   w: (M_inter, K_packed) uint32 — up_proj weight, M-major layout
+//   scales/biases: (M_inter, K / group_size) bf16/fp16
+//   x: (..., K) bf16/fp16 — post-norm input to up_proj
+//   gate_out: (..., M_inter) bf16/fp16 — dense gate_proj output (mask source)
+//   threshold: float — gates rows where |silu(gate_out[m])| <= threshold
+//
+// Returns: (..., M_inter) bf16/fp16 intermediate = silu(gate)*up_proj(x),
+// with exact 0 at masked rows (so down_proj K-skip can derive sparse_indices
+// from this).
+MLX_API array fused_silu_mskip_qmv(
+    const array& w,
+    const array& scales,
+    const array& biases,
+    const array& x,
+    const array& gate_out,
+    float threshold,
+    int group_size = 64,
+    int bits = 4,
+    int num_simdgroups = 4,
+    StreamOrDevice s = {});
+
+// Mask-aware M-skip GEMV on mlx's standard M-major quantized weight layout.
+// Dead rows (mask[m] == 0) are skipped entirely (early-exit before weight
+// load) — bandwidth savings proportional to dead fraction. Designed for
+// DejaVu-up FFN projections (gate_proj, up_proj) and any other M-axis
+// sparsity that has a per-row mask.
+//
+// w: (M, K_packed) uint32, mlx's quantized layout
+// scales / biases: (M, K / group_size) float16
+// x: (..., K) float16
+// mask: (M,) uint8 — 1 = compute, 0 = skip (output 0)
+// returns: (..., M) float16
+MLX_API array mskip_qmv(
+    const array& w,
+    const array& scales,
+    const array& biases,
+    const array& x,
+    const array& mask,
+    int group_size = 64,
+    int bits = 4,
+    int num_simdgroups = 4,
+    StreamOrDevice s = {});
+
+// 3-mask SpQt sparse-indexing: q/k/v share the same post-norm input x but
+// have different thresholds. Single dispatch reads x once and produces three
+// count-prefix sparse_indices buffers, packed into a single int32 output of
+// length 3 * (K + 1). Caller slices: idx_q = out[:K+1], idx_k = out[K+1:2K+2],
+// idx_v = out[2K+2:3K+3].
+MLX_API array zigzag_sparse_indexing_qkv(
+    const array& x,
+    float tau_q,
+    float tau_k,
+    float tau_v,
+    StreamOrDevice s = {});
+
+// SpQt sparse-indexing kernel: compact positions where |x| > threshold into a
+// count-prefix int32 buffer [n, idx_0, ..., idx_{n-1}, 0...]. SIMD prefix-sum
+// + cross-TG atomic counter; O(K) parallel work, no sort. Replaces the
+// `argsort + concatenate` pattern that adds per-call overhead.
+//
+// Output shape: (K + 1,) int32. Slot 0 = count (rounded down to nearest 16).
+// Slots 1..n = active positions in K-order. Slots n+1..K = uninitialised
+// (kernel only writes the prefix slots it computed).
+MLX_API array zigzag_sparse_indexing(
+    const array& x,
+    float threshold,
+    StreamOrDevice s = {});
+
+// SpQt zigzag-layout M-skip quantized GEMV. active_indices holds the M-positions
+// (output rows) to keep, count-prefix int32 format [n, idx_0, ..., idx_{n-1}] sorted.
+// Output rows NOT in active_indices are zero. First cut: dense GEMV + zero-inactive
+// post-pass (no wall-clock saving vs dense). The optimized row-walk variant is
+// planned but not yet implemented.
+MLX_API array zigzag_qmv_mskip(
+    const array& x,
+    const array& active_indices,
+    const array& w,
+    const array& scales,
+    const array& biases,
+    int group_size = 64,
+    int bits = 4,
     StreamOrDevice s = {});
 
 /** Quantize a matrix along its last axis */

@@ -4383,6 +4383,149 @@ void init_ops(nb::module_& m) {
           dtype float32.
     )pbdoc");
 
+  m.def(
+    "fused_silu_mskip_qmv",
+    &mx::fused_silu_mskip_qmv,
+    "w"_a,
+    "scales"_a,
+    "biases"_a,
+    "x"_a,
+    "gate_out"_a,
+    "threshold"_a,
+    "group_size"_a = 64,
+    "bits"_a = 4,
+    "num_simdgroups"_a = 4,
+    nb::kw_only(),
+    "stream"_a = nb::none(),
+    nb::sig(
+        "def fused_silu_mskip_qmv(w: array, scales: array, biases: array, x: array, gate_out: array, threshold: float, group_size: int = 64, bits: int = 4, num_simdgroups: int = 4, *, stream: Union[None, Stream, Device] = None) -> array"),
+    R"pbdoc(
+      Fused FFN block: silu(gate_out) + |silu|>τ mask + mskip up_proj + multiply.
+
+      Each simdgroup handles 1 output row. Lane 0 computes silu(gate_out[m]),
+      compares with threshold, broadcasts to other lanes via simd_broadcast.
+      If the row is dead (|silu| <= τ), the SG writes 0 and returns — no
+      up_proj weight load. Otherwise the SG runs a standard mskip-pattern
+      K-walk over up_proj and writes silu_val * up_dot_x.
+
+      Accepts both fp16 and bf16 directly (no explicit cast needed in the caller).
+    )pbdoc");
+
+  m.def(
+    "mskip_qmv",
+    &mx::mskip_qmv,
+    "w"_a,
+    "scales"_a,
+    "biases"_a,
+    "x"_a,
+    "mask"_a,
+    "group_size"_a = 64,
+    "bits"_a = 4,
+    "num_simdgroups"_a = 4,
+    nb::kw_only(),
+    "stream"_a = nb::none(),
+    nb::sig(
+        "def mskip_qmv(w: array, scales: array, biases: array, x: array, mask: array, group_size: int = 64, bits: int = 4, num_simdgroups: int = 4, *, stream: Union[None, Stream, Device] = None) -> array"),
+    R"pbdoc(
+      Mask-aware M-skip GEMV on mlx's M-major quantized weight layout.
+
+      Each simdgroup handles one output row; dead rows (mask[m] == 0)
+      early-exit before any weight load, yielding bandwidth savings
+      proportional to the dead fraction. Designed for DejaVu-up FFN
+      projections (gate_proj, up_proj) and any other M-axis sparsity.
+
+      Args:
+        w (array): (M, K_packed) uint32 — mlx's standard quantized layout
+          (NOT zigzag).
+        scales (array): (M, K / group_size) float16.
+        biases (array): (M, K / group_size) float16.
+        x (array): (..., K) float16.
+        mask (array): (M,) uint8 — 1 = compute, 0 = skip (write 0).
+        group_size (int, optional): Default 64.
+        bits (int, optional): Default 4.
+        num_simdgroups (int, optional): Threadgroup geometry — SGs per TG.
+          Default 4.
+      Returns:
+        array: (..., M) float16, with 0 at masked-out rows.
+    )pbdoc");
+
+  m.def(
+    "zigzag_sparse_indexing_qkv",
+    &mx::zigzag_sparse_indexing_qkv,
+    nb::arg(),
+    "tau_q"_a,
+    "tau_k"_a,
+    "tau_v"_a,
+    nb::kw_only(),
+    "stream"_a = nb::none(),
+    nb::sig(
+        "def zigzag_sparse_indexing_qkv(x: array, /, tau_q: float, tau_k: float, tau_v: float, *, stream: Union[None, Stream, Device] = None) -> array"),
+    R"pbdoc(
+      3-mask SpQt sparse-indexing for q/k/v which share the same post-norm
+      input x but have different thresholds.
+
+      Single kernel dispatch reads x once and produces three count-prefix
+      sparse_indices buffers, packed into a single int32 output of length
+      3 * (K + 1). Caller slices:
+        idx_q = out[:K+1]
+        idx_k = out[K+1:2*(K+1)]
+        idx_v = out[2*(K+1):3*(K+1)]
+
+      Each slot is a standard count-prefix int32 buffer: slot[0] is the
+      count (rounded down to a multiple of 16), slot[1:1+count] are the
+      active K-positions in ascending order.
+    )pbdoc");
+
+  m.def(
+    "zigzag_sparse_indexing",
+    &mx::zigzag_sparse_indexing,
+    nb::arg(),
+    "threshold"_a,
+    nb::kw_only(),
+    "stream"_a = nb::none(),
+    nb::sig(
+        "def zigzag_sparse_indexing(x: array, /, threshold: float, *, stream: Union[None, Stream, Device] = None) -> array"),
+    R"pbdoc(
+      Compact positions where |x| > threshold into a count-prefix int32 array.
+
+      Ported from llama.cpp-SpQt's `kernel_sparse_indexing_v2`: SIMD
+      prefix-sum compaction + cross-TG atomic counter. O(K) parallel work,
+      no sort. Designed as a fast replacement for the
+      `mx.argsort(-mask).concatenate(count)` pattern.
+
+      Args:
+        x (array): float16 1-D activation vector of shape (K,).
+        threshold (float): positions where |x| > threshold are kept.
+
+      Returns:
+        array: int32 of shape (K + 1,). Slot 0 = count (rounded down to a
+        multiple of 16 for kernel-alignment). Slots 1..count are active
+        K-positions, sorted ascending. Slots count+1..K are uninitialised.
+    )pbdoc");
+
+  m.def(
+    "zigzag_qmv_dense_fast",
+    &mx::zigzag_qmv_dense_fast,
+    nb::arg(),
+    nb::arg(),
+    "scales"_a,
+    "biases"_a,
+    "group_size"_a = 64,
+    "bits"_a = 4,
+    "num_simdgroups"_a = 16,
+    "results_per_simdgroup"_a = 4,
+    nb::kw_only(),
+    "stream"_a = nb::none(),
+    nb::sig(
+        "def zigzag_qmv_dense_fast(x: array, w: array, /, scales: array, biases: array, group_size: int = 64, bits: int = 4, num_simdgroups: int = 16, results_per_simdgroup: int = 4, *, stream: Union[None, Stream, Device] = None) -> array"),
+    R"pbdoc(
+      SpQt zigzag-layout dense quantized GEMV — "fast" variant for the
+      overhead-bound regime (≤4 MB weights). Same math as zigzag_qmv_dense
+      with a single-TG-per-band design (no cross-TG atomics, no zero-fill).
+
+      `num_simdgroups * results_per_simdgroup` must equal `group_size`.
+    )pbdoc");
+
    m.def(
     "zigzag_qmv_sparse",
     &mx::zigzag_qmv_sparse,
@@ -4420,7 +4563,45 @@ void init_ops(nb::module_& m) {
         array: ``x[:, idx] @ dequantize(w)[:, idx].T``, shape
         ``(B, M)``, dtype float32.
       )pbdoc");
- 
+
+   m.def(
+    "zigzag_qmv_mskip",
+    &mx::zigzag_qmv_mskip,
+    nb::arg(),
+    nb::arg(),
+    nb::arg(),
+    "scales"_a,
+    "biases"_a,
+    "group_size"_a = 64,
+    "bits"_a = 4,
+    nb::kw_only(),
+    "stream"_a = nb::none(),
+    nb::sig(
+        "def zigzag_qmv_mskip(x: array, active_indices: array, w: array, /, scales: array, biases: array, group_size: int = 64, bits: int = 4, *, stream: Union[None, Stream, Device] = None) -> array"),
+    R"pbdoc(
+      SpQt zigzag-layout M-skip quantized GEMV.
+
+      Output rows whose M-position is not listed in ``active_indices`` are
+      zero; the other rows hold the dense GEMV result. ``active_indices`` is
+      in count-prefix format ``[n, idx_0, ..., idx_{n-1}]``, sorted.
+
+      First-cut implementation: runs the dense GEMV unmodified and then a
+      post-pass kernel zeroes the inactive rows. No wall-clock saving vs
+      ``zigzag_qmv_dense`` yet — the optimized row-walk variant is planned.
+
+      Args:
+        x (array): Input activations of shape ``(B, K)``, dtype float16.
+        active_indices (array): Active M-positions in count-prefix format,
+          dtype int32, sorted.
+        w (array): Zigzag-packed quantized weights, dtype uint32.
+        scales (array): Per-group scales, dtype float16.
+        biases (array): Per-group biases, dtype float16.
+        group_size (int, optional): Default: ``64``.
+        bits (int, optional): Default: ``4``.
+      Returns:
+        array: ``(B, M)`` float32, with inactive output rows set to 0.
+      )pbdoc");
+
    m.def(
       "quantize",
       &mx::quantize,
